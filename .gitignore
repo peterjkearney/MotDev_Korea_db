@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+._*
+
+# Editors / tools
+.vscode/
+.claude/
+
+# Never commit data, videos or model weights -- they live on Drive / the BioCV archive
+*.mp4
+*.avi
+*.mov
+*.c3d
+*.npz
+*.npy
+*.pt
+*.bin
+*.pkl
+*.zip
