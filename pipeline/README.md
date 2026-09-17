@@ -58,37 +58,42 @@ triangulated-target results.
   emits zeros, so its results do not move; **every OpenPose result, Korea
   included, needs rerunning from step_2a.**  `--missing zero` restores the old
   behaviour (ladder rung C).
-- **`--json-frames` is `auto` now** (step_1_openpose_2d, run_batch).  The
-  JSONs from `run_openpose.py` are numbered by the decimated 60 fps video, but
-  both defaults were `original`, so JSON *n* was read as native frame *n*:
-  only the first third of the rows found a JSON at all, and those were
-  3.3x time-stretched, so the subject matched the projected mocap on a
-  handful of frames.  `auto` reads the layout off the JSON dir (`frames.json`,
-  else the JSON count against the video's) and the step refuses a reading
-  under which most rows have no JSON.  Any OpenPose `{cam}_2d.npz` made
-  before this is wrong and must be regenerated from the JSONs.
+- **OpenPose output is one JSON per video, with its frame numbers.**
+  `run_openpose.py` decimates the video before OpenPose sees it, so OpenPose's
+  own per-frame files are numbered by the decimated video -- and
+  `step_1_openpose_2d` / `run_batch` defaulted to reading JSON *n* as native
+  frame *n*.  Only the first third of the rows found a JSON at all, 3.3x
+  time-stretched, so the subject matched the projected mocap on a handful of
+  frames.  The per-video `{cam}_openpose.json` now carries `native_frame_idx`,
+  and `--json-frames` is gone.  Any OpenPose `{cam}_2d.npz` from the old
+  results folder is wrong; re-import the JSONs and rerun step 1op.
 
 ## Layout
 
+Inputs are read from `BIOCV_ROOT` (= `TRIAL_DIR`), the copy of BioCV unzipped
+on the VM's local disk.  Outputs go to `BIOCV_OUT` (= `OUT_DIR`, default
+`/content/drive/MyDrive/MotorDevelopment/Data/BioCV`), the original BioCV
+folder on Drive, inside each action's `Analysis/`.  Nothing is written
+locally, so nothing needs syncing and nothing is lost with the runtime.  Each
+output's location is one function in `config.py`, used by the step that
+writes it and every step that reads it.
+
 ```
-{TRIAL_DIR}/{user}/user_meta.json                   {"stature_m": ...}
 {TRIAL_DIR}/{user}/{cam}.mp4-mocAligned.calib       w, h, K, L_ext (lab mm -> cam mm), dist
-{TRIAL_DIR}/{user}/{action}/markers.c3d             BioCV only
-{TRIAL_DIR}/{user}/{action}/openpose/{cam}/*_keypoints.json   BioCV, OpenPose output
-{TRIAL_DIR}/{user}/{action}/Analysis/keypoints/{cam}_2d.npz            the 2D steps 2a-8 read
-{TRIAL_DIR}/{user}/{action}/Analysis/keypoints/openpose/{cam}_2d.npz   step_1_openpose_2d's own copy
-{TRIAL_DIR}/{user}/{action}/Analysis/keypoints/yolo/{cam}_2d.npz       step_1_extract_2d's own copy
-{TRIAL_DIR}/{user}/{action}/Analysis/keypoints/mocap_h36m.npz          (step_0)
-{TRIAL_DIR}/{user}/{action}/Analysis/keypoints/openpose_tri_h36m.npz   (step_1b / step_1_korea)
+{TRIAL_DIR}/{user}/user_meta.json                   {"stature_m": ...}
+{TRIAL_DIR}/{user}/{action}/markers.c3d, {cam}.mp4
+
+{OUT_DIR}/{user}/{action}/Analysis/H36M/mocap_h36m.npz                        step_0
+{OUT_DIR}/{user}/{action}/Analysis/keypoints/yolo/{cam}_2d.npz, _tracks.mp4   step_1_extract_2d
+{OUT_DIR}/{user}/{action}/Analysis/keypoints/openpose/{cam}_openpose.json     tools/run_openpose
+{OUT_DIR}/{user}/{action}/Analysis/keypoints/openpose/{cam}_2d.npz            step_1_openpose_2d
 ```
 
-Both 2D steps used to write only `keypoints/{cam}_2d.npz`, so running one
-detector silently replaced the other's files.  Each now keeps its own copy in
-`keypoints/{detector}/` and then copies it to `keypoints/{cam}_2d.npz` to
-make it the one the later steps use; `--no-activate` skips that copy.
-
-Set `BIOCV_ROOT` (= `TRIAL_DIR`) and `BIOCV_RESULTS` in the environment;
-Colab: `%env BIOCV_ROOT=/content/data/BioCV`.
+Steps 0, 1 and 1op are moved so far.  Run with no `--user` / `--action` they
+do every trial, skip what is already done (`--force` to redo) and carry on
+past a failure, so re-running after a disconnect resumes; `--dry-run` lists
+the work.  **Steps 1b and 2a onwards still use the old layout** (`Analysis/keypoints/`
+under `TRIAL_DIR`, synced to `RESULTS_DIR` by `run_batch.py`) until they are moved too.
 
 ## Stream 1 — adults, OpenPose
 
@@ -106,21 +111,21 @@ python3 tools/run_openpose.py --openpose-bin /content/openpose/build/examples/op
 
 For every `{user}/{action}/{cam}.mp4` it decimates the video to the 60 fps
 frames step_1 would use (3.3x fewer for OpenPose), runs the binary with
-BODY_25 and `--write_json`, and writes `{trial}/openpose/{cam}/`.  Each
-finished camera is copied to `RESULTS_DIR` (Drive) immediately, and at the
-start of a run anything already complete there is copied back and skipped --
-`TRIAL_DIR` is the VM's local disk and does not survive the runtime, so this
-is what makes a disconnect cost only the camera in flight.  **Run it before
-`run_batch.py` in every session**, even when all cameras are done; that is
-what restores the JSONs for `step_1op`.  Measured: ~77 s per camera on a T4
-(cuDNN-free build), ~12 min per 9-camera trial; `--users/--actions/--cameras`
-pick a subset.
+BODY_25 and `--write_json` into a temp dir, and folds the per-frame files into
+ONE `{cam}_openpose.json` per video under `OUT_DIR`, with the native frame
+number of every entry.  A camera is done when that file exists, so re-running
+the same command after a disconnect resumes, losing at most the camera in
+flight.  Per-frame JSON dirs from the old results folder need not be
+recomputed: `--import-from /content/drive/MyDrive/MotorDevelopment/results`
+folds every complete one into the new file (no OpenPose build needed for
+that).  Measured: ~77 s per camera on a T4 (cuDNN-free build), ~12 min per
+9-camera trial; `--users/--actions/--cameras` pick a subset.
 
 Then, per trial (or via `run_batch.py`, below):
 
 ```
 python3 step_0_load_mocap.py     --user P08 --action P08_CMJM_01
-python3 step_1_openpose_2d.py    --user P08 --action P08_CMJM_01 --json-frames decimated
+python3 step_1_openpose_2d.py    --user P08 --action P08_CMJM_01
 python3 step_1b_triangulate_2d.py --user P08 --action P08_CMJM_01     # prints tri-vs-mocap cost
 python3 step_2a_extract_betas.py --user P08 --action P08_CMJM_01     # GPU
 python3 step_2b_finalise_betas.py --user P08 --action P08_CMJM_01
@@ -130,11 +135,9 @@ python3 step_8_spider_error.py   --user P08 --action P08_CMJM_01 --gt mocap
 python3 step_8_spider_error.py   --user P08 --action P08_CMJM_01 --gt triangulated
 ```
 
-`--json-frames original` if OpenPose was run on the native 200 Hz video
-instead.  Frame lists come from the video (`frames.json`, written by
-`run_openpose.py`, or recomputed from the video for older runs) -- never
-from the mocap, which desynchronised trials whose mocap and video lengths
-differ.  `tools/check_sync.py` prints the per-trial counts and flags any
+The JSON records which native frame each entry is, so the 2D, the video and
+the mocap share one clock whether OpenPose ran on the decimated or the native
+video.  `tools/check_sync.py` prints the per-trial counts and flags any
 trial where the stages disagree.  Batch:
 
 ```
@@ -229,8 +232,7 @@ step_5's top-down view with mocap and both H36M skeletons (right).
 `{cam}_summary.csv` has MPJPE / PA-MPJPE against mocap, the frames that
 passed the betas gate and PnP successes per run.  Threshold 0 is the plain
 OpenPose-vs-YOLO comparison.  It reads `keypoints/openpose/` and
-`keypoints/yolo/` (see Layout); add the detector a trial was not run with
-using that step's `--no-activate`.
+`keypoints/yolo/` (see Layout).
 
 ## Floors, measured by feeding the target back through the pipeline
 

@@ -43,6 +43,12 @@ def twod_path(user, action, detector, cam):
     return os.path.join(analysis_dir(user, action), 'keypoints', detector, f'{cam}_2d.npz')
 
 
+def openpose_json_path(user, action, cam):
+    """tools/run_openpose.py: OpenPose's BODY_25 output for one video -- every frame and every
+    person in ONE json, with the native frame number of each entry (utils/openpose.py)."""
+    return os.path.join(analysis_dir(user, action), 'keypoints', 'openpose', f'{cam}_openpose.json')
+
+
 def require_out_dir():
     """A path under /content/drive with Drive not mounted is silently created on the
     VM's own disk and lost with the runtime -- stop instead."""

@@ -4,7 +4,7 @@
 BioCV videos are 200 Hz.  OpenPose is slow, and step_1_openpose_2d.py only
 takes the frames nearest_frame_indices() picks for --target-fps (60 by
 default), so run OpenPose on this decimated copy instead -- 3.3x fewer
-frames -- and pass --json-frames decimated.  The frame selection is the same
+frames -- (tools/run_openpose.py does this itself and records the frame numbers).  The frame selection is the same
 function step_1 uses, so decimated frame i is exactly native frame
 source_frame_idx[i].
 

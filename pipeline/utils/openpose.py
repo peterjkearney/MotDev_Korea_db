@@ -125,16 +125,59 @@ def read_openpose_frame(path):
     return kp[:, :, :2], kp[:, :, 2]
 
 
-def load_openpose_video(json_dir, frame_numbers):
-    """People per requested frame.  Returns list (len = len(frame_numbers)) of
-    (xy (P,25,2), conf (P,25)); a frame with no JSON yields P = 0."""
+# One JSON per video.  OpenPose itself writes one file per frame; hundreds of tiny files per
+# camera are slow on Drive, and say nothing about WHICH video frame each one is -- they are
+# numbered by the video OpenPose was given, which tools/run_openpose.py decimates first.
+# Reading them by the wrong numbering once desynchronised every OpenPose result.  The
+# per-video file carries `native_frame_idx`, so there is nothing left to guess:
+#
+#   {"format": "openpose_video_v1", "model": "BODY_25", "video": "06.mp4",
+#    "video_fps": 200.0, "video_n_frames": 1253, "target_fps": 60,
+#    "native_frame_idx": [0, 3, 7, ...],               entry i is this frame of the source video
+#    "frames": [{"people": [{"pose_keypoints_2d": [x, y, c, ... 75 numbers]}, ...]}, ...]}
+OPENPOSE_VIDEO_FORMAT = 'openpose_video_v1'
+
+
+def consolidate_openpose_dir(json_dir, native_frame_idx, **meta):
+    """OpenPose's per-frame JSON dir -> the one-file-per-video document above.
+
+    Frames are taken in the order of OpenPose's own numbering.  `native_frame_idx` may be
+    one longer than the JSONs (OpenPose stops at the last decodable frame, which can be one
+    short of the video's frame count); any other mismatch is an error."""
     files = list_openpose_jsons(json_dir)
-    out = []
-    for n in frame_numbers:
-        p = files.get(int(n))
-        out.append(read_openpose_frame(p) if p else
-                   (np.zeros((0, 25, 2), np.float32), np.zeros((0, 25), np.float32)))
-    return out
+    n = len(files)
+    idx = [int(i) for i in native_frame_idx]
+    if not (n > 0 and n <= len(idx) <= n + 1):
+        raise ValueError(f'{json_dir}: {n} JSONs but {len(idx)} frame indices')
+    frames = []
+    for k in sorted(files):
+        with open(files[k]) as f:
+            people = json.load(f).get('people', [])
+        frames.append({'people': [{'pose_keypoints_2d': p['pose_keypoints_2d']} for p in people]})
+    return dict(format=OPENPOSE_VIDEO_FORMAT, model='BODY_25', **meta,
+                native_frame_idx=idx[:n], frames=frames)
+
+
+def save_openpose_video(path, doc):
+    """Written to a temp name and renamed, so an interrupted write never looks complete."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(doc, f, separators=(',', ':'))
+    os.replace(tmp, path)
+
+
+def load_openpose_video(path):
+    """(doc, people): the document, and per frame (xy (P,25,2), conf (P,25)) for its P people."""
+    with open(path) as f:
+        doc = json.load(f)
+    if doc.get('format') != OPENPOSE_VIDEO_FORMAT:
+        raise ValueError(f'{path}: not an {OPENPOSE_VIDEO_FORMAT} file')
+    people = []
+    for fr in doc['frames']:
+        kp = np.array([p['pose_keypoints_2d'] for p in fr['people']], np.float32).reshape(-1, 25, 3)
+        people.append((kp[:, :, :2], kp[:, :, 2]))
+    return doc, people
 
 
 def pick_person(xy_people, conf_people, ref_xy, ref_ok, conf_thresh=0.3,

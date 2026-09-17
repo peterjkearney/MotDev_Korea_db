@@ -22,9 +22,9 @@ import numpy as np
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
 sys.path.insert(0, _HERE)
-from config import TRIAL_DIR, mocap_path
+from config import TRIAL_DIR, mocap_path, openpose_json_path
 from run_batch import discover
-from utils.openpose import list_openpose_jsons
+import json
 
 
 def main():
@@ -51,7 +51,10 @@ def main():
                 cap = cv2.VideoCapture(vpath)
                 vn, vf = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)), cap.get(cv2.CAP_PROP_FPS)
                 cap.release()
-            nj = len(list_openpose_jsons(os.path.join(trial, 'openpose', cam)))
+            jp, nj = openpose_json_path(user, action, cam), 0
+            if os.path.exists(jp):
+                with open(jp) as f:
+                    nj = len(json.load(f)['frames'])
             pp = os.path.join(kp, 'PnP', f'{cam}_pnp.npz')
             npnp = np.load(pp)['kps_H36M_placed'].shape[0] if os.path.exists(pp) else 0
             flags = []

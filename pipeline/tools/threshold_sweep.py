@@ -110,20 +110,19 @@ def publish(tmp_path, out_path):
 # ------------------------------------------------------------------ 2D inputs
 
 def find_2d(det, explicit, cam, kp_dirs, user, action):
-    """{cam}_2d.npz for one detector: the path given, else where its step writes it.
-    YOLO: config.twod_path (OUT_DIR).  OpenPose: still keypoints/openpose/ under the trial
-    (local, then RESULTS_DIR) until step_1_openpose_2d.py is moved to OUT_DIR as well."""
+    """{cam}_2d.npz for one detector: the path given, else where its step writes it
+    (config.twod_path: Analysis/keypoints/{yolo,openpose}/ under OUT_DIR)."""
     if explicit:
         p = explicit if explicit.endswith('.npz') else os.path.join(explicit, f'{cam}_2d.npz')
         if not os.path.exists(p):
             raise SystemExit(f'no {p}')
         return p
-    cands = [twod_path(user, action, det, cam)] if det == 'yolo' else [os.path.join(kp, det, f'{cam}_2d.npz') for kp in kp_dirs]
+    cands = [twod_path(user, action, det, cam)]
     for p in cands:
         if os.path.exists(p):
             return p
     make = ('step_1_extract_2d.py --pattern {cam}.mp4' if det == 'yolo'
-            else 'step_1_openpose_2d.py --no-activate --cameras {cam}').format(cam=cam)
+            else 'step_1_openpose_2d.py --cameras {cam}').format(cam=cam)
     raise SystemExit(f'no {DET_LABEL[det]} 2D: looked for ' + ' and '.join(cands)
                      + f'\nmake it with:  python3 {make} --user ... --action ...   (or pass --{det}-2d)')
 

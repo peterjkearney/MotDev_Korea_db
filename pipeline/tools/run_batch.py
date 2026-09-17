@@ -160,8 +160,9 @@ def outputs_present(user, action, step, cameras):
     # steps already moved to OUT_DIR (their paths come from config, not from `outs`)
     if name == 'step_0':
         return os.path.exists(mocap_path(user, action))
-    if name == 'step_1':
-        return all(os.path.exists(twod_path(user, action, 'yolo', c)) for c in cameras)
+    if name in ('step_1', 'step_1op'):
+        det = 'yolo' if name == 'step_1' else 'openpose'
+        return all(os.path.exists(twod_path(user, action, det, c)) for c in cameras)
     base = analysis_dir(user, action)
     return all(os.path.exists(os.path.join(base, r)) for r in outs(cameras))
 
@@ -183,8 +184,6 @@ def run_step(user, action, step, cameras, args):
         cmd += ['--conf-thresh', str(args.conf_thresh)]
     if name == 'step_8':
         cmd += ['--gt', args.gt]
-    if name == 'step_1op':
-        cmd += ['--json-frames', args.json_frames]
     if name == 'step_4':
         cmd += ['--process-accel-std', str(args.accel_std)]
 
@@ -305,9 +304,6 @@ def main():
                     help=f'default: {DEFAULT_STEPS}; pick from {",".join(STEP_NAMES)}')
     ap.add_argument('--gt', default='mocap', choices=['mocap', 'triangulated'],
                     help='ground truth for step_8 and for the results table')
-    ap.add_argument('--json-frames', default='auto', choices=['auto', 'original', 'decimated'],
-                    help='passed to step_1op; auto reads the layout off each JSON dir (run_openpose.py '
-                         'writes decimated JSONs, and reading those as original was a silent desync)')
     ap.add_argument('--joint-variant', default='smooth_all', choices=VARIANTS,
                     help='which error series fills the per-joint columns')
     ap.add_argument('--conf-thresh', type=float, default=0.3)

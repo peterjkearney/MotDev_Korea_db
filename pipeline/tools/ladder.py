@@ -198,11 +198,7 @@ def main():
             f'live in the BioCV data root -- but BIOCV_ROOT is {TRIAL_DIR}, which has none for '
             f'{user}/{action}. Set BIOCV_ROOT to the data root (e.g. /content/data/BioCV) with '
             f'the trial copied there, keep BIOCV_RESULTS on the results folder, or use --rungs C,D,E.')
-    # each detector's 2D has its own folder (step_1 / step_1_openpose_2d); older trials only
-    # have the shared keypoints/{cam}_2d.npz
-    det_dir = lambda d: (os.path.join(base_kp, d) if os.path.exists(os.path.join(base_kp, d, f'{cam}_2d.npz'))
-                         else None)
-    op_dir = args.openpose_2d or det_dir('openpose') or base_kp
+    op_dir = args.openpose_2d or os.path.dirname(twod_path(user, action, 'openpose', cam))
     if cam not in cams:
         raise SystemExit(f'camera {cam} not among {cams}')
     print(f'trial {user}/{action}, camera {cam}, cameras {",".join(cams)}\nwork {work}\nlog  {log}\n')
