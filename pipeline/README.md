@@ -84,7 +84,7 @@ writes it and every step that reads it.
 {TRIAL_DIR}/{user}/{action}/markers.c3d, {cam}.mp4
 
 {OUT_DIR}/{user}/{action}/Analysis/H36M/mocap_h36m.npz                        step_0
-{OUT_DIR}/{user}/{action}/Analysis/keypoints/yolo/{cam}_2d.npz, _tracks.mp4   step_1_extract_2d
+{OUT_DIR}/{user}/{action}/Analysis/keypoints/yolo/{cam}_2d.npz               step_1_extract_2d
 {OUT_DIR}/{user}/{action}/Analysis/keypoints/openpose/{cam}_openpose.json     tools/run_openpose
 {OUT_DIR}/{user}/{action}/Analysis/keypoints/openpose/{cam}_2d.npz            step_1_openpose_2d
 ```

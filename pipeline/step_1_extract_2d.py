@@ -17,8 +17,6 @@ Run inside the motor-dev container:
 
 import os
 import glob
-import shutil
-import tempfile
 import argparse
 
 import numpy as np
@@ -234,57 +232,6 @@ _TAB10_BGR = [
 ]  # matplotlib tab10, reordered RGB->BGR for cv2
 
 
-def animateYoloTrack(mocap2d, history, w, h, out_path, fps=60, out_width=800):
-    """Draw mocap (blue) vs every tracked YOLO id (one color each) directly onto video
-    frames with OpenCV and write out_path. Avoids matplotlib's per-frame Agg redraw, which
-    is far slower than cv2.circle + cv2.VideoWriter for a few hundred/thousand frames."""
-
-    # frames common to both streams (histories can differ in length if the loop broke early)
-    n = min(len(mocap2d), *(len(v) for v in history.values())) if history else len(mocap2d)
-
-    def clean(arr, conf_thr=0.3):
-        """(n,17,3) YOLO -> (n,17,2), absent/low-confidence joints as NaN so they aren't drawn."""
-        xy = arr[:n, :, :2].astype(float).copy()
-        missing = np.all(arr[:n] == 0, axis=2) | (arr[:n, :, 2] < conf_thr)
-        xy[missing] = np.nan
-        return xy
-
-    tracks = {tid: clean(v) for tid, v in history.items()}
-    ids = list(tracks)
-
-    scale = out_width / w
-    out_h = int(round(h * scale))
-    mocap_scaled = mocap2d[:n, :, :2] * scale
-    tracks_scaled = {tid: xy * scale for tid, xy in tracks.items()}
-
-    legend = [('mocap', (255, 0, 0))] + [(f'id {tid}', _TAB10_BGR[i % 10]) for i, tid in enumerate(ids)]
-
-    writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (out_width, out_h))
-    try:
-        for i in range(n):
-            frame = np.full((out_h, out_width, 3), 255, dtype=np.uint8)
-
-            for x, y in mocap_scaled[i]:
-                if np.isfinite(x) and np.isfinite(y):
-                    cv2.circle(frame, (int(round(x)), int(round(y))), 4, (255, 0, 0), -1)
-
-            for j, tid in enumerate(ids):
-                color = _TAB10_BGR[j % 10]
-                for x, y in tracks_scaled[tid][i]:
-                    if np.isfinite(x) and np.isfinite(y):
-                        cv2.circle(frame, (int(round(x)), int(round(y))), 4, color, -1)
-
-            cv2.putText(frame, f'frame {i}/{n - 1}', (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
-            for k, (label, color) in enumerate(legend):
-                ly = 20 + (k + 1) * 18
-                cv2.circle(frame, (out_width - 100, ly - 4), 4, color, -1)
-                cv2.putText(frame, label, (out_width - 90, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1, cv2.LINE_AA)
-
-            writer.write(frame)
-    finally:
-        writer.release()
-
-
 def reset_tracker(model):
     """Forget every track before a new video. model.track(persist=True) keeps its tracker
     between calls, which is what links frames within a video -- but across videos it would
@@ -363,14 +310,6 @@ def process_trial(user, action, model, args):
 
             out_path = _twod_path(user, action, 'yolo', stem)
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
-            if not args.no_tracks_video:
-                # rendered on local disk, then copied next to the npz (cv2 writing through the
-                # Drive mount is slow and can leave a truncated mp4)
-                tmp = os.path.join(tempfile.gettempdir(), f'{action}_{stem}_tracks.mp4')
-                animateYoloTrack(mocap2d, keypoints_all_users, src_w, src_h, tmp)
-                shutil.copy2(tmp, os.path.join(os.path.dirname(out_path), f'{stem}_tracks.mp4'))
-                os.remove(tmp)
-            # the npz is written LAST: its presence is what marks this camera as done
             np.savez(out_path,
                      h36m_2d=keypoints_all_users[best_id],                # (T, 17, 3) x_px, y_px, conf
                      source_frame_idx=source_frame_idx,          # indices into the original 200Hz stream
@@ -394,8 +333,6 @@ def main():
     ap.add_argument('--pattern', default='0*.mp4')
     ap.add_argument('--conf', type=float, default=0.3)
     ap.add_argument('--target-fps', type=float, default=60)
-    ap.add_argument('--no-tracks-video', action='store_true',
-                    help='skip the {cam}_tracks.mp4 diagnostic (every tracked person vs projected mocap)')
     ap.add_argument('--force', action='store_true', help='redo cameras whose output already exists')
     ap.add_argument('--dry-run', action='store_true', help='list what would be extracted, run nothing')
     args = ap.parse_args()
