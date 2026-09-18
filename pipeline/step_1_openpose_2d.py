@@ -23,10 +23,12 @@ frame-aligned at the native rate, per the mocAligned calibration); rows past
 the end of the mocap are missing, and a duration mismatch is reported.
 
 Person selection.  OpenPose has no track ids, so the subject is chosen PER
-FRAME: the person whose H36M limb joints lie closest to the projected mocap
-(same scoring as step_1's find_closest_user_to_mocap, without the temporal
-bookkeeping a tracker needs).  Frames with no acceptable match are written as
-missing (all zeros), and `detected` records which frames matched.
+FRAME: the person whose detected H36M limb joints lie closest to the
+projected mocap, provided that person has at least half of the limb joints
+the mocap has and sits within --max-match-px of it.  Joints a person lacks
+are not counted against them (utils/openpose.pick_person says why).  Frames
+with no acceptable match are written as missing (all zeros), and `detected`
+records which frames matched.
 
     python3 step_1_openpose_2d.py                                  # everything
     python3 step_1_openpose_2d.py --user User03 --action P03_CMJM_01 [--cameras 06,07]
@@ -102,13 +104,15 @@ def convert(user, action, cam, mocap, args):
     body25 = np.zeros((T, 25, 3), np.float32)
     detected = np.zeros(T, bool)
     score = np.full(T, np.nan)
+    n_matched = np.zeros(T, int)
     n_people = np.zeros(T, int)
     for i, (xy_p, conf_p) in enumerate(people):
         n_people[i] = len(xy_p)
         ref_ok = valid_joint & np.isfinite(mocap2d[i]).all(axis=1)
-        k, s = pick_person(xy_p, conf_p, mocap2d[i], ref_ok, conf_thresh=args.conf)
+        k, s, nm = pick_person(xy_p, conf_p, mocap2d[i], ref_ok, conf_thresh=args.conf)
         if k is None or s > args.max_match_px:
             continue
+        n_matched[i] = nm
         body25[i, :, :2] = xy_p[k]
         body25[i, :, 2] = conf_p[k]
         h36m[i] = body25_to_h36m_2d(xy_p[k:k + 1], conf_p[k:k + 1])[0]
@@ -119,7 +123,7 @@ def convert(user, action, cam, mocap, args):
     os.makedirs(os.path.dirname(out), exist_ok=True)
     np.savez(out, h36m_2d=h36m, body25_2d=body25, source_frame_idx=source_frame_idx,
              video=f'{cam}.mp4', fps=out_fps, detected=detected, match_px=score,
-             n_people=n_people, joint_names=np.array(H36M_NAMES),
+             n_matched_joints=n_matched, max_match_px=args.max_match_px, n_people=n_people, joint_names=np.array(H36M_NAMES),
              detector=np.array('openpose_body25'),
              video_fps=vfps, video_n_frames=vn, mocap_fps=native_fps, mocap_n_frames=len(kps_native))
     med = np.nanmedian(score) if detected.any() else np.nan
@@ -135,8 +139,9 @@ def main():
     ap.add_argument('--cameras', default=None, help='comma-separated subset; default every camera with a JSON')
     ap.add_argument('--target-fps', type=float, default=60)
     ap.add_argument('--conf', type=float, default=0.3)
-    ap.add_argument('--max-match-px', type=float, default=150.0,
-                    help='reject the best person if its mean joint distance to mocap exceeds this')
+    ap.add_argument('--max-match-px', type=float, default=80.0,
+                    help='reject the closest person if the mean distance to the projected mocap, over the limb '
+                         'joints that person has, exceeds this (the subject is typically 5-25 px away)')
     ap.add_argument('--force', action='store_true', help='redo cameras whose output already exists')
     ap.add_argument('--dry-run', action='store_true', help='list what would be converted, run nothing')
     args = ap.parse_args()

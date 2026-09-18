@@ -180,28 +180,34 @@ def load_openpose_video(path):
     return doc, people
 
 
-def pick_person(xy_people, conf_people, ref_xy, ref_ok, conf_thresh=0.3,
-                penalty_px=960.0, min_joints=4):
-    """Index of the OpenPose person best matching a reference 2D skeleton.
+def pick_person(xy_people, conf_people, ref_xy, ref_ok, conf_thresh=0.3, min_coverage=0.5, min_joints=4):
+    """Index of the OpenPose person best matching a reference 2D skeleton (both H36M-17 order).
 
-    Both sides in H36M-17 order.  Same scoring as step_1's
-    find_closest_user_to_mocap, per frame: mean distance over the reference's
-    valid core joints, with a missing/low-confidence detection charged
-    `penalty_px`.  Returns (index or None, score).
+    Returns (index or None, distance, n_matched): the mean pixel distance over the limb joints
+    that person actually has (confidence > conf_thresh) among the reference's valid ones, and
+    how many that was.  A candidate needs at least `min_coverage` of the reference's valid limb
+    joints (and `min_joints`); among those the closest wins.
+
+    Undetected joints are NOT charged a penalty.  They once were (960 px each, as in step_1's
+    whole-track ranking), and the caller accepted a frame only under 150 px: two low-confidence
+    limb joints -- routine on a side-on view -- added 160 px and rejected a subject sitting
+    11 px from the mocap, on every frame of the clip.  Coverage is what guards against a
+    fragment of a bystander; distance is only ever measured on joints that were seen.
     """
     if len(xy_people) == 0:
-        return None, np.inf
+        return None, np.inf, 0
     core = np.array(H36M_CORE)
     ok = ref_ok[core]
+    need = max(min_joints, int(np.ceil(min_coverage * ok.sum())))
     if ok.sum() < min_joints:
-        return None, np.inf
-    best, best_s = None, np.inf
+        return None, np.inf, 0
+    best, best_d, best_n = None, np.inf, 0
     for i in range(len(xy_people)):
         h = body25_to_h36m_2d(xy_people[i:i + 1], conf_people[i:i + 1])[0]
-        det = h[core, 2] > conf_thresh
-        d = np.linalg.norm(h[core, :2] - ref_xy[core], axis=1)
-        d = np.where(det, np.minimum(d, penalty_px), penalty_px)
-        s = float(d[ok].mean())
-        if s < best_s:
-            best, best_s = i, s
-    return best, best_s
+        m = ok & (h[core, 2] > conf_thresh)
+        if m.sum() < need:
+            continue
+        d = float(np.linalg.norm(h[core, :2] - ref_xy[core], axis=1)[m].mean())
+        if d < best_d:
+            best, best_d, best_n = i, d, int(m.sum())
+    return best, best_d, best_n
