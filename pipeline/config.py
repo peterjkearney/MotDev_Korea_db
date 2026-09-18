@@ -166,3 +166,17 @@ def _find(name, env):
 
 MB_DIR     = _find('MotionBERT', 'MB_DIR')
 MODELS_DIR = _find('models', 'MODELS_DIR')
+
+
+def require_motionbert():
+    """Stop with directions if MotionBERT is not where MB_DIR says, rather than dying on
+    `No module named 'lib'` when its package is imported."""
+    need = [os.path.join(MB_DIR, 'lib'),
+            os.path.join(MB_DIR, 'configs', 'mesh', 'MB_ft_pw3d.yaml'),
+            os.path.join(MB_DIR, 'checkpoint', 'mesh', 'FT_MB_release_MB_ft_pw3d', 'best_epoch.bin'),
+            os.path.join(MB_DIR, 'data', 'mesh')]
+    missing = [p for p in need if not os.path.exists(p)]
+    if missing:
+        raise SystemExit('MotionBERT not found at ' + MB_DIR + ' -- missing:\n  ' + '\n  '.join(missing)
+                         + '\nset the MB_DIR environment variable to the MotionBERT folder '
+                           '(Colab: %env MB_DIR=/content/drive/MyDrive/.../MotionBERT)')

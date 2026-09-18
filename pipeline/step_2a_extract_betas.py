@@ -37,6 +37,8 @@ _SCRIPT_DIR     = os.path.dirname(os.path.abspath(__file__))
 from config import DETECTORS, twod_path as _twod_path, betas_path as _betas_path, require_out_dir, OUT_DIR as _OUT_DIR, find_cameras
 from config import MB_DIR as _MB_DIR      # resolved in config.py; ../MotionBERT no longer holds here
 
+from config import require_motionbert
+require_motionbert()
 for _d in (_MB_DIR, _SCRIPT_DIR):
     if _d not in sys.path:
         sys.path.insert(0, _d)

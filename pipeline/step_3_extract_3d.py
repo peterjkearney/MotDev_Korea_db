@@ -34,6 +34,8 @@ from config import (DETECTORS, OUT_DIR as _OUT_DIR, betas_path as _betas_path, f
                     mesh_pose_path as _mesh_path, stature_path, find_cameras, require_out_dir)
 from config import MB_DIR as _MB_DIR      # resolved in config.py; ../MotionBERT no longer holds here
 
+from config import require_motionbert
+require_motionbert()
 for _d in (_MB_DIR, _SCRIPT_DIR):
     if _d not in sys.path:
         sys.path.insert(0, _d)

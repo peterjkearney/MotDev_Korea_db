@@ -144,6 +144,8 @@ def apply_threshold(h2d, thr, mode):
 
 def load_motionbert(device):
     import torch
+    from config import require_motionbert
+    require_motionbert()
     if MB_DIR not in sys.path:
         sys.path.insert(0, MB_DIR)
     from lib.utils.tools import get_config
