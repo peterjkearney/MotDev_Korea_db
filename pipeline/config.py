@@ -100,6 +100,11 @@ def spider_path(user, action, detector, gt='mocap'):
                         f'spider_error_{action}{"" if gt == "mocap" else "_tri"}.png')
 
 
+def openpose_check_path(user, action, cam):
+    """tools/render_openpose_check.py: the video with OpenPose's people, confidences and the projected mocap."""
+    return os.path.join(analysis_dir(user, action), 'diagnostics', 'openpose', f'{cam}_openpose_check.mp4')
+
+
 def calib_path(user, cam):
     """{cam}.mp4-mocAligned.calib: with the local copy of the data, else on Drive."""
     for root in (TRIAL_DIR, OUT_DIR):

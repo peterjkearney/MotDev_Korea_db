@@ -223,6 +223,19 @@ leave-one-out target step_8 actually scores.  It only needs `Analysis/`, so
 pointing `BIOCV_ROOT` at `RESULTS_DIR` renders straight from the synced
 outputs without re-running anything.
 
+## Checking OpenPose against the mocap by eye
+
+```
+python3 tools/render_openpose_check.py --user User03 --action P03_CMJM_01 --camera 01 [--slow 4]
+```
+
+The source video, cropped to the subject, with every person OpenPose found
+(the one the matcher picks in orange, others grey), the confidence written
+beside each joint (red under `--conf`), the projected mocap in green, and a
+status line per frame: people found, the pick, its distance over the joints
+it has, and ACCEPTED / REJECTED under step_1_openpose_2d's rule.  Written to
+`Analysis/diagnostics/openpose/{cam}_openpose_check.mp4`.
+
 ## OpenPose vs YOLO through MotionBERT: threshold sweep
 
 ```
