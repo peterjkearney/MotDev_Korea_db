@@ -59,6 +59,14 @@ def openpose_json_path(user, action, cam):
     return os.path.join(analysis_dir(user, action), 'keypoints', 'openpose', f'{cam}_openpose.json')
 
 
+DETECTORS = ('openpose', 'yolo')
+
+
+def betas_path(user, action, detector, cam):
+    """step_2a: MotionBERT pass 1 on one detector's 2D -- per-frame SMPL rotations and betas."""
+    return os.path.join(analysis_dir(user, action), 'mesh', detector, f'{cam}_betas.npz')
+
+
 def require_out_dir():
     """A path under /content/drive with Drive not mounted is silently created on the
     VM's own disk and lost with the runtime -- stop instead."""
