@@ -36,7 +36,9 @@ from matplotlib.patches import Polygon, Patch
 
 import json
 
-from config import TRIAL_DIR as _TRIAL_DIR, mocap_path as _mocap_path, tri_target_path as _tri_path
+from config import (DETECTORS, OUT_DIR as _OUT_DIR, mocap_path as _mocap_path, tri_target_path as _tri_path,
+                    twod_path as _twod_path, pnp_path as _pnp_path, metrics_path as _metrics_path,
+                    spider_path as _spider_path, stature_path, find_cameras, require_out_dir)
 from utils import metrics as M
 LAB_UP = np.array([0.0, 0.0, 1.0])   # lab frame: Z up, floor z = 0 (mocap; the fitted floor for Korea)
 
@@ -161,32 +163,14 @@ def draw_floor_map(ax, traj_xy, heading_xy, frame_ok, cam_data_by_label, subject
     ax.legend(handles, labels_, loc='best', fontsize=7)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--cameras', default='00,01,02,03,04,05,06,07,08')
-    ap.add_argument('--user', required=True)
-    ap.add_argument('--action', required=True)
-    ap.add_argument('--conf-thresh', type=float, default=0.3)
-    ap.add_argument('--gt', choices=['mocap', 'triangulated'], default='mocap',
-                    help='ground truth: mocap_h36m.npz, or openpose_tri_h36m.npz '
-                         '(triangulated OpenPose, leave-one-out per camera -- the only '
-                         'option for Korea, and the like-for-like one for BioCV)')
-    args = ap.parse_args()
-    cameras = args.cameras.split(',')
+def score_trial(user, action, cameras, args):
+    """Every camera of one trial against the ground truth -> chart + metrics.  Returns a summary line."""
     suffix = '' if args.gt == 'mocap' else '_tri'
-
-    trial_root = os.path.join(_TRIAL_DIR, args.user, args.action)
-    pnp_dir = os.path.join(trial_root, 'Analysis', 'keypoints', 'PnP')
-    yolo_2d_dir = os.path.join(trial_root, 'Analysis', 'keypoints')
-    out_dir = os.path.join(trial_root, 'Analysis', 'diagnostics')
-    os.makedirs(out_dir, exist_ok=True)
-
     gt_name = 'mocap_h36m.npz' if args.gt == 'mocap' else 'openpose_tri_h36m.npz'
-    mocap_path = _mocap_path(args.user, args.action) if args.gt == 'mocap' else _tri_path(args.user, args.action)
+    mocap_path = _mocap_path(user, action) if args.gt == 'mocap' else _tri_path(user, action)
     if not os.path.exists(mocap_path):
-        print(f"no {mocap_path} -- run " + ('step_0_load_mocap.py' if args.gt == 'mocap'
-              else 'step_1b_triangulate_2d.py / step_1_korea_2d.py') + " first")
-        return
+        raise FileNotFoundError(f"{mocap_path} -- run " + ('step_0_load_mocap.py' if args.gt == 'mocap'
+                                else 'step_1b_triangulate_2d.py / step_1_korea_2d.py') + " first")
     mocap_data = np.load(mocap_path)
     mocap_world_mm = mocap_data['kps3d']                     # (T,17,3) mm, world/lab-space
     mocap_valid_joint_mask = mocap_data['valid_joint_mask']  # (17,) False for Nose/Head
@@ -196,7 +180,7 @@ def main():
         gt_loo = {str(c): mocap_data['kps3d_loo'][i] for i, c in enumerate(mocap_data['cameras'])}
 
     stature_mm = None
-    meta_path = os.path.join(_TRIAL_DIR, args.user, 'user_meta.json')
+    meta_path = stature_path(user)
     if os.path.exists(meta_path):
         with open(meta_path) as f:
             stature_mm = 1000.0 * float(json.load(f)['stature_m'])
@@ -214,8 +198,8 @@ def main():
     n_frames = []
 
     for camera in cameras:
-        pnp_path = os.path.join(pnp_dir, f'{camera}_pnp.npz')
-        yolo_2d_path = os.path.join(yolo_2d_dir, f'{camera}_2d.npz')
+        pnp_path = _pnp_path(user, action, args.detector, camera)
+        yolo_2d_path = _twod_path(user, action, args.detector, camera)
         if not os.path.exists(pnp_path) or not os.path.exists(yolo_2d_path):
             print(f"=== camera {camera}: missing pnp/2d data, skipping ===")
             continue
@@ -280,8 +264,9 @@ def main():
                      bone_pred_cv=[bones[b]['pred_cv'] for b in bones])
         extras.append(extra)
         pct = (f"  = {100 * e_placed_all / stature_mm:.1f}% of stature" if stature_mm else '')
-        print(f"    PA-MPJPE {extra['pa_mpjpe']:6.1f}mm  N-MPJPE {extra['n_mpjpe']:6.1f}mm{pct}")
-        if bones:
+        if args.verbose:
+            print(f"    PA-MPJPE {extra['pa_mpjpe']:6.1f}mm  N-MPJPE {extra['n_mpjpe']:6.1f}mm{pct}")
+        if bones and args.verbose:
             print('    bone length, predicted / ground truth: ' +
                   '  '.join(f"{b} {bones[b]['ratio']:.2f}" for b in bones
                             if np.isfinite(bones[b]['ratio'])))
@@ -290,9 +275,10 @@ def main():
         cam_heading = camera_lab_heading_xy(L_ext)
         angle = camera_azimuth_deg(cam_xy, subject_lab_xy)
 
-        print(f"=== camera {camera}  angle={angle:6.1f}deg  "
+        if args.verbose:
+            print(f"=== camera {camera}  angle={angle:6.1f}deg  "
               f"placed(all)={e_placed_all:6.1f}mm  placed(conf)={e_placed_conf:6.1f}mm  "
-              f"smooth(all)={e_smooth_all:6.1f}mm  smooth(conf)={e_smooth_conf:6.1f}mm ===")
+                  f"smooth(all)={e_smooth_all:6.1f}mm  smooth(conf)={e_smooth_conf:6.1f}mm ===")
 
         angles.append(angle)
         labels.append(camera)
@@ -308,8 +294,7 @@ def main():
         n_frames.append(T)
 
     if not angles:
-        print("no camera data found")
-        return
+        raise ValueError('no camera has both a PnP result and a target')
 
     # sort by angle so the polygon's edges follow the cameras' real order around the room
     order = np.argsort(angles)
@@ -353,23 +338,23 @@ def main():
     ax.set_xticklabels([f'cam {c}\n{a:.0f}\N{DEGREE SIGN}' for c, a in zip(labels, angles)])
     ax.set_ylabel('mean 3D joint error (mm)', labelpad=30)
     ax.set_title(f'PnP vs {"mocap" if args.gt == "mocap" else "triangulated OpenPose (LOO)"}: '
-                 f'mean 3D joint error by camera\n{args.user} / {args.action}', pad=24)
+                 f'mean 3D joint error by camera\n{user} / {action} ({args.detector})', pad=24)
     ax.legend(loc='lower left', bbox_to_anchor=(-0.15, -0.15), fontsize=7)
 
     draw_floor_map(ax_map, traj_xy, heading_xy, frame_ok, cam_data_by_label, subject_lab_xy)
 
-    out_path = os.path.join(out_dir, f'spider_error_{args.action}{suffix}.png')
+    out_path = _spider_path(user, action, args.detector, args.gt)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"\n-> {out_path}")
 
     # Machine-readable twin of the plot, for tools/run_batch.py to aggregate
     # across trials. Rows follow the same angle-sorted camera order as the
     # chart, so index i means the same camera in both.
-    metrics_path = os.path.join(out_dir, f'error_metrics{suffix}.npz')
+    metrics_path = _metrics_path(user, action, args.detector, args.gt)
     ex = [extras[i] for i in order]
     np.savez(metrics_path,
-             gt=np.array(args.gt), stature_mm=np.array(stature_mm if stature_mm else np.nan),
+             gt=np.array(args.gt), detector=np.array(args.detector), stature_mm=np.array(stature_mm if stature_mm else np.nan),
              pa_mpjpe=np.array([e['pa_mpjpe'] for e in ex]),
              n_mpjpe=np.array([e['n_mpjpe'] for e in ex]),
              perjoint_pa=np.array([e['perjoint_pa'] for e in ex]),
@@ -392,7 +377,50 @@ def main():
              perjoint_placed_conf=np.array(pj_placed_conf)[order],
              perjoint_smooth_all=np.array(pj_smooth_all)[order],
              perjoint_smooth_conf=np.array(pj_smooth_conf)[order])
-    print(f"-> {metrics_path}")
+    return (f'{len(labels)} cameras, placed {np.nanmean(err_placed_all):.0f} mm, smooth '
+            f'{np.nanmean(err_smooth_all):.0f} mm, PA {np.nanmean([e["pa_mpjpe"] for e in ex]):.0f} mm -> {metrics_path}')
+
+
+def main():
+    ap = argparse.ArgumentParser(description='Error vs ground truth, per camera. With no --user/--action, every '
+                                             'trial with PnP results from --detector; trials already scored are skipped.')
+    ap.add_argument('--detector', choices=DETECTORS, default='openpose')
+    ap.add_argument('--user', default=None, help='default: every user')
+    ap.add_argument('--action', default=None, help='default: every action (of --user, or of every user)')
+    ap.add_argument('--cameras', default=None, help='comma-separated subset; default every camera with a PnP result')
+    ap.add_argument('--conf-thresh', type=float, default=0.3)
+    ap.add_argument('--gt', choices=['mocap', 'triangulated'], default='mocap',
+                    help='ground truth: mocap, or the triangulated OpenPose target '
+                         '(leave-one-out per camera -- the only option for Korea, and the like-for-like one for BioCV)')
+    ap.add_argument('--verbose', action='store_true', help='print every camera, not just the trial summary')
+    ap.add_argument('--force', action='store_true', help='redo trials already scored against this --gt')
+    ap.add_argument('--dry-run', action='store_true', help='list what would be scored')
+    args = ap.parse_args()
+
+    require_out_dir()
+    want = set(args.cameras.split(',')) if args.cameras else None
+    by_trial = {}
+    for u, a, c in find_cameras(_pnp_path, args.detector, args.user, args.action, want):
+        by_trial.setdefault((u, a), []).append(c)
+    if not by_trial:
+        raise SystemExit(f'no {args.detector} {{cam}}_pnp.npz under {_OUT_DIR} for user={args.user or "*"} '
+                         f'action={args.action or "*"} -- run step_4_PnP.py first')
+    todo = [t for t in sorted(by_trial) if args.force or not os.path.exists(_metrics_path(*t, args.detector, args.gt))]
+    print(f'{args.detector} vs {args.gt}: {len(by_trial)} trial(s) with PnP results under {_OUT_DIR}: '
+          f'{len(todo)} to score, {len(by_trial) - len(todo)} already done')
+    if args.dry_run:
+        for user, action in todo:
+            print(f'  {user}/{action}: cameras {",".join(by_trial[(user, action)])}')
+        return
+    n_done, failed = 0, []
+    for user, action in todo:
+        try:
+            print(f'{user}/{action}: {score_trial(user, action, by_trial[(user, action)], args)}', flush=True)
+            n_done += 1
+        except Exception as e:                      # one bad trial must not stop the batch
+            failed.append((user, action))
+            print(f'{user}/{action}: FAILED -- {type(e).__name__}: {e}', flush=True)
+    print(f'\nscored {n_done}, already done {len(by_trial) - len(todo)}, failed {len(failed)}')
 
 
 if __name__ == '__main__':

@@ -2,8 +2,15 @@
 """
 step_6_extract_features.py — per-camera movement features from the PnP-placed,
 stature-scaled SMPL-24 joint centres (step_4_PnP.py) and the per-frame SMPL
-joint rotations (step_3_extract_3d.py), written to
-    {user}/{action}/Analysis/features/{cam}_features.npz
+joint rotations (step_3_extract_3d.py):
+
+    reads   {OUT_DIR}/{user}/{action}/Analysis/PnP/{detector}/{cam}_pnp.npz
+            {OUT_DIR}/{user}/{action}/Analysis/mesh/{detector}/{cam}_mesh_pose.npz
+            {OUT_DIR}/{user}/{action}/Analysis/keypoints/{detector}/{cam}_2d.npz
+    writes  {OUT_DIR}/{user}/{action}/Analysis/features/{detector}/{cam}_features.npz
+
+With no --user / --action it does every camera with a PnP result from
+--detector; cameras already done are skipped (--force redoes them).
 
 Using the SMPL-24 keypoints rather than H36M as SMPL-24 limbs are rigid, H36M markers are more
 closely aligned with the skin, so joint angles are not represented correctly.
@@ -37,7 +44,8 @@ import argparse
 
 import numpy as np
 
-from config import TRIAL_DIR as _TRIAL_DIR
+from config import (DETECTORS, OUT_DIR as _OUT_DIR, twod_path as _twod_path, mesh_pose_path as _mesh_path,
+                    pnp_path as _pnp_path, features_path as _feat_path, find_cameras, require_out_dir)
 
 SMPL_JOINT_NAMES = [
     'Pelvis', 'L_Hip', 'R_Hip', 'Spine1', 'L_Knee', 'R_Knee', 'Spine2',
@@ -210,32 +218,12 @@ def compute_features(J, rotmats, fps, smooth_window=9):
     return feats, eul
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--user', required=True)
-    ap.add_argument('--action', required=True)
-    ap.add_argument('--cameras', default='00,01,02,03,04,05,06,07,08')
-    ap.add_argument('--conf-thresh', type=float, default=0.3,
-                    help='2D Hip/Thorax confidence below this = person not in shot')
-    ap.add_argument('--smooth-window', type=int, default=9,
-                    help='Gaussian window (frames, odd) applied to positions before '
-                         'differentiating velocities; 1 = no smoothing')
-    args = ap.parse_args()
-
-    analysis = os.path.join(_TRIAL_DIR, args.user, args.action, 'Analysis')
-    kc, out_dir = os.path.join(analysis, 'keypoints'), os.path.join(analysis, 'features')
-    os.makedirs(out_dir, exist_ok=True)
-
-    for cam in args.cameras.split(','):
-        paths = {'pnp': os.path.join(kc, 'PnP', f'{cam}_pnp.npz'),
-                 'mesh': os.path.join(kc, 'mesh', f'{cam}_mesh_pose.npz'),
-                 '2d': os.path.join(kc, f'{cam}_2d.npz')}
-        missing = [p for p in paths.values() if not os.path.exists(p)]
-        if missing:
-            print(f'=== camera {cam}: missing {missing}, skipping ===')
-            continue
-        print(f'=== camera {cam} ===')
-        pnp, mesh, yolo = (np.load(paths[k]) for k in ('pnp', 'mesh', '2d'))
+def extract(user, action, cam, args):
+    """One camera -> {cam}_features.npz.  Returns a summary line."""
+    if True:
+        pnp = np.load(_pnp_path(user, action, args.detector, cam))
+        mesh = np.load(_mesh_path(user, action, args.detector, cam))
+        yolo = np.load(_twod_path(user, action, args.detector, cam))
         J_cam_noisy, J_cam_smooth, rotmats, h2d = pnp['kps_SMPL24_placed'],pnp['kps_SMPL24_smooth'], mesh['rotmats'], yolo['h36m_2d']
         sfi, fps = yolo['source_frame_idx'], float(yolo['fps'])
         T = min(J_cam_noisy.shape[0], J_cam_smooth.shape[0],rotmats.shape[0], h2d.shape[0], sfi.shape[0])
@@ -278,7 +266,8 @@ def main():
         merged_feats.update({f'{k}_smooth': v for k, v in feats_smooth.items() if k not in shared_feats})
 
 
-        out = os.path.join(out_dir, f'{cam}_features.npz')
+        out = _feat_path(user, action, args.detector, cam)
+        os.makedirs(os.path.dirname(out), exist_ok=True)
         np.savez(out, **merged_feats,
                  frame_valid=valid, pnp_ok=pnp_ok, person_in_shot=in_shot, detected=detected,
                  core_confidence=core_conf, source_frame_idx=sfi, fps=fps,
@@ -287,12 +276,47 @@ def main():
                  rotmats=rotmats.astype(np.float32), joint_euler_xyz_deg=eul.astype(np.float32),
                  smpl_joint_names=np.array(SMPL_JOINT_NAMES),
                  units=np.array('positions/heights m, velocities m/s, angles deg, lab frame Z-up floor z=0'))
-        # ka = feats['knee_angle_L'][valid]
-        # print(f'  {valid.sum()}/{T} valid frames (pnp ok {pnp_ok.sum()}, in shot {in_shot.sum()}, detected {detected.sum()})'
-        #       f' | knee_angle_L {np.nanmin(ka):.0f}..{np.nanmax(ka):.0f} deg'
-        #       f' | ankle_height_L {np.nanmin(feats["ankle_height_L"]):.2f}..{np.nanmax(feats["ankle_height_L"]):.2f} m'
-        #       f' | hip_forward_velocity mean {np.nanmean(feats["hip_forward_velocity"]):+.2f} m/s')
-        print(f'  -> {out}')
+        return f'{valid.sum()}/{T} valid frames (pnp ok {pnp_ok.sum()}, in shot {in_shot.sum()}, detected {detected.sum()})'
+
+
+def main():
+    ap = argparse.ArgumentParser(description='Movement features. With no --user/--action, every camera with a PnP '
+                                             'result from --detector; cameras already done are skipped.')
+    ap.add_argument('--detector', choices=DETECTORS, default='openpose')
+    ap.add_argument('--user', default=None, help='default: every user')
+    ap.add_argument('--action', default=None, help='default: every action (of --user, or of every user)')
+    ap.add_argument('--cameras', default=None, help='comma-separated subset; default every camera with a PnP result')
+    ap.add_argument('--conf-thresh', type=float, default=0.3,
+                    help='2D Hip/Thorax confidence below this = person not in shot')
+    ap.add_argument('--smooth-window', type=int, default=9,
+                    help='Gaussian window (frames, odd) applied to positions before '
+                         'differentiating velocities; 1 = no smoothing')
+    ap.add_argument('--force', action='store_true', help='redo cameras whose output already exists')
+    ap.add_argument('--dry-run', action='store_true', help='list what would be run')
+    args = ap.parse_args()
+
+    require_out_dir()
+    jobs = find_cameras(_pnp_path, args.detector, args.user, args.action,
+                        set(args.cameras.split(',')) if args.cameras else None)
+    if not jobs:
+        raise SystemExit(f'no {args.detector} {{cam}}_pnp.npz under {_OUT_DIR} for user={args.user or "*"} '
+                         f'action={args.action or "*"} -- run step_4_PnP.py first')
+    todo = [j for j in jobs if args.force or not os.path.exists(_feat_path(j[0], j[1], args.detector, j[2]))]
+    print(f'{args.detector}: {len(jobs)} camera(s) with a PnP result under {_OUT_DIR}: {len(todo)} to run, '
+          f'{len(jobs) - len(todo)} already done')
+    if args.dry_run:
+        for user, action in sorted({(u, a) for u, a, _ in todo}):
+            print(f'  {user}/{action}: {",".join(c for u, a, c in todo if (u, a) == (user, action))}')
+        return
+    n_done, failed = 0, []
+    for user, action, cam in todo:
+        try:
+            print(f'{user}/{action} {cam}: {extract(user, action, cam, args)}', flush=True)
+            n_done += 1
+        except Exception as e:
+            failed.append((user, action, cam))
+            print(f'{user}/{action} {cam}: FAILED -- {type(e).__name__}: {e}', flush=True)
+    print(f'\ndone {n_done}, already done {len(jobs) - len(todo)}, failed {len(failed)}')
 
 
 if __name__ == '__main__':

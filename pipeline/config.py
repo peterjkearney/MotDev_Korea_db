@@ -78,6 +78,37 @@ def mesh_pose_path(user, action, detector, cam):
     return os.path.join(analysis_dir(user, action), 'mesh', detector, f'{cam}_mesh_pose.npz')
 
 
+def pnp_path(user, action, detector, cam):
+    """step_4: the skeleton placed in this camera's frame by PnP (per frame) + the smoothed copy."""
+    return os.path.join(analysis_dir(user, action), 'PnP', detector, f'{cam}_pnp.npz')
+
+
+def features_path(user, action, detector, cam):
+    """step_6: joint angles, heights and velocities in the lab frame, per frame."""
+    return os.path.join(analysis_dir(user, action), 'features', detector, f'{cam}_features.npz')
+
+
+def metrics_path(user, action, detector, gt='mocap'):
+    """step_8: per-camera error metrics against mocap ('mocap') or the triangulated target ('triangulated')."""
+    return os.path.join(analysis_dir(user, action), 'diagnostics', detector,
+                        'error_metrics.npz' if gt == 'mocap' else 'error_metrics_tri.npz')
+
+
+def spider_path(user, action, detector, gt='mocap'):
+    """step_8: the error-by-camera chart that goes with metrics_path."""
+    return os.path.join(analysis_dir(user, action), 'diagnostics', detector,
+                        f'spider_error_{action}{"" if gt == "mocap" else "_tri"}.png')
+
+
+def calib_path(user, cam):
+    """{cam}.mp4-mocAligned.calib: with the local copy of the data, else on Drive."""
+    for root in (TRIAL_DIR, OUT_DIR):
+        p = os.path.join(root, user, f'{cam}.mp4-mocAligned.calib')
+        if os.path.exists(p):
+            return p
+    return os.path.join(TRIAL_DIR, user, f'{cam}.mp4-mocAligned.calib')
+
+
 def stature_path(user):
     """user_meta.json ({"stature_m": ...}): with the local copy of the data, else on Drive."""
     for root in (TRIAL_DIR, OUT_DIR):
