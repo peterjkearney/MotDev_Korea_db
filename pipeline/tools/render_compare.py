@@ -33,7 +33,7 @@ from matplotlib import animation, gridspec
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
-from config import TRIAL_DIR, mocap_path
+from config import TRIAL_DIR, mocap_path, tri_target_path
 from utils.calibration import reproject
 
 H36M_LIMBS = [(0, 1), (1, 2), (2, 3), (0, 4), (4, 5), (5, 6), (0, 7), (7, 8), (8, 9), (9, 10),
@@ -79,7 +79,7 @@ def main():
     kp = os.path.join(trial, 'Analysis', 'keypoints')
     d2 = np.load(os.path.join(kp, f'{cam}_2d.npz'))
     pnp = np.load(os.path.join(kp, 'PnP', f'{cam}_pnp.npz'))
-    gtf = np.load(os.path.join(kp, 'openpose_tri_h36m.npz') if args.gt == 'triangulated'
+    gtf = np.load(tri_target_path(args.user, args.action) if args.gt == 'triangulated'
                   else mocap_path(args.user, args.action))
 
     sfi = d2['source_frame_idx']

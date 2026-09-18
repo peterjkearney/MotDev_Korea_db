@@ -43,6 +43,16 @@ def twod_path(user, action, detector, cam):
     return os.path.join(analysis_dir(user, action), 'keypoints', detector, f'{cam}_2d.npz')
 
 
+def tri_target_path(user, action):
+    """step_1b: triangulated-OpenPose ground truth, mocap_h36m.npz's layout (leave-one-out per camera)."""
+    return os.path.join(analysis_dir(user, action), 'H36M', 'openpose_tri_h36m.npz')
+
+
+def tri_vs_mocap_path(user, action):
+    """step_1b: how far the triangulated target sits from mocap, per joint and camera."""
+    return os.path.join(analysis_dir(user, action), 'H36M', 'tri_vs_mocap.npz')
+
+
 def openpose_json_path(user, action, cam):
     """tools/run_openpose.py: OpenPose's BODY_25 output for one video -- every frame and every
     person in ONE json, with the native frame number of each entry (utils/openpose.py)."""

@@ -87,12 +87,13 @@ writes it and every step that reads it.
 {OUT_DIR}/{user}/{action}/Analysis/keypoints/yolo/{cam}_2d.npz               step_1_extract_2d
 {OUT_DIR}/{user}/{action}/Analysis/keypoints/openpose/{cam}_openpose.json     tools/run_openpose
 {OUT_DIR}/{user}/{action}/Analysis/keypoints/openpose/{cam}_2d.npz            step_1_openpose_2d
+{OUT_DIR}/{user}/{action}/Analysis/H36M/openpose_tri_h36m.npz, tri_vs_mocap.npz   step_1b_triangulate_2d
 ```
 
-Steps 0, 1 and 1op are moved so far.  Run with no `--user` / `--action` they
+Steps 0, 1, 1op and 1b are moved so far.  Run with no `--user` / `--action` they
 do every trial, skip what is already done (`--force` to redo) and carry on
 past a failure, so re-running after a disconnect resumes; `--dry-run` lists
-the work.  **Steps 1b and 2a onwards still use the old layout** (`Analysis/keypoints/`
+the work.  **Steps 2a onwards still use the old layout** (`Analysis/keypoints/`
 under `TRIAL_DIR`, synced to `RESULTS_DIR` by `run_batch.py`) until they are moved too.
 
 ## Stream 1 — adults, OpenPose

@@ -36,7 +36,7 @@ from matplotlib.patches import Polygon, Patch
 
 import json
 
-from config import TRIAL_DIR as _TRIAL_DIR, mocap_path as _mocap_path
+from config import TRIAL_DIR as _TRIAL_DIR, mocap_path as _mocap_path, tri_target_path as _tri_path
 from utils import metrics as M
 LAB_UP = np.array([0.0, 0.0, 1.0])   # lab frame: Z up, floor z = 0 (mocap; the fitted floor for Korea)
 
@@ -182,7 +182,7 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     gt_name = 'mocap_h36m.npz' if args.gt == 'mocap' else 'openpose_tri_h36m.npz'
-    mocap_path = _mocap_path(args.user, args.action) if args.gt == 'mocap' else os.path.join(yolo_2d_dir, gt_name)
+    mocap_path = _mocap_path(args.user, args.action) if args.gt == 'mocap' else _tri_path(args.user, args.action)
     if not os.path.exists(mocap_path):
         print(f"no {mocap_path} -- run " + ('step_0_load_mocap.py' if args.gt == 'mocap'
               else 'step_1b_triangulate_2d.py / step_1_korea_2d.py') + " first")

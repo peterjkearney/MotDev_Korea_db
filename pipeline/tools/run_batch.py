@@ -33,7 +33,7 @@ import time
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PIPE = os.path.dirname(_HERE)
 sys.path.insert(0, _PIPE)
-from config import TRIAL_DIR, RESULTS_DIR, mocap_path, twod_path
+from config import TRIAL_DIR, RESULTS_DIR, mocap_path, twod_path, tri_target_path
 from sync_results import sync_trial
 
 import numpy as np
@@ -160,6 +160,8 @@ def outputs_present(user, action, step, cameras):
     # steps already moved to OUT_DIR (their paths come from config, not from `outs`)
     if name == 'step_0':
         return os.path.exists(mocap_path(user, action))
+    if name == 'step_1t':
+        return os.path.exists(tri_target_path(user, action))
     if name in ('step_1', 'step_1op'):
         det = 'yolo' if name == 'step_1' else 'openpose'
         return all(os.path.exists(twod_path(user, action, det, c)) for c in cameras)

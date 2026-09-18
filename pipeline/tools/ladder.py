@@ -40,7 +40,7 @@ import numpy as np
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PIPE = os.path.dirname(_HERE)
 sys.path.insert(0, _PIPE)
-from config import TRIAL_DIR, RESULTS_DIR, mocap_path, twod_path
+from config import TRIAL_DIR, RESULTS_DIR, mocap_path, twod_path, tri_target_path
 from utils.calibration import load_calib, reproject
 from utils.missing_joints import fill_missing
 
@@ -100,12 +100,11 @@ def make_variant(work, user, action, rung, base_trial, base_kp_src, cams):
         v = os.path.join(base_trial, f'{cam}.mp4')
         if os.path.exists(v):
             os.symlink(v, os.path.join(vdir, f'{cam}.mp4'))
-    p = os.path.join(base_kp_src, 'openpose_tri_h36m.npz')
-    if os.path.exists(p):
-        shutil.copy2(p, kp)
-    h36m = os.path.join(vdir, 'Analysis', 'H36M')          # config.mocap_path's layout, under the work root
+    h36m = os.path.join(vdir, 'Analysis', 'H36M')          # config's H36M/ layout, under the work root
     os.makedirs(h36m, exist_ok=True)
     shutil.copy2(mocap_path(user, action), h36m)
+    if os.path.exists(tri_target_path(user, action)):
+        shutil.copy2(tri_target_path(user, action), h36m)
     return vdir, kp
 
 
@@ -285,7 +284,7 @@ def main():
         step('step_4_PnP.py', user, vaction, env, log, '--cameras', cam, '--process-accel-std', args.accel_std)
         step('step_8_spider_error.py', user, vaction, env, log, '--cameras', cam, '--gt', 'mocap')
         row = read_metrics(vdir, cam, 'mocap') or {}
-        if os.path.exists(os.path.join(kp, 'openpose_tri_h36m.npz')):
+        if os.path.exists(tri_target_path(user, action)):
             step('step_8_spider_error.py', user, vaction, env, log, '--cameras', cam, '--gt', 'triangulated')
             tri = read_metrics(vdir, cam, 'triangulated')
             if tri:
