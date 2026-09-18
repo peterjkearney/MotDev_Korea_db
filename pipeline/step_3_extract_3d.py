@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
-"""
-step_2_extract_3d.py — CUDA-only pass: 
-Motionbert pass 2: use average betas from pass 1 to extract fixed-proportion vertices
-run MotionBERT-Mesh (whole-clip
-crop_scale, per-frame windowed inference) on a camera's already-extracted
-2D detections, saving keypoints for H36M skeleton and keypoints/rotations for SMPL-24 skeleton
+"""step_3_extract_3d.py -- MotionBERT pass 2: the skeleton with a fixed body shape.
 
-Runs inside the motor-dev container (needs torch/CUDA, not GL/X11):
-    docker run --rm --runtime nvidia \
-      -v /ssd/MotorDevelopment:/ssd/MotorDevelopment \
-      -w /ssd/MotorDevelopment/Python/PnP_depth_clean \
-      motor-dev:latest \
-      python3 step_3_extract_3d.py --user User28 --action P28_CMJM_01
+SMPL is run with step_2b's betas (one shape per camera) and step_2a's per-frame
+rotations; the H36M-17 and SMPL-24 joints are regressed from the mesh and
+scaled so the mesh's T-pose height matches the subject's stature.
+
+    reads   {OUT_DIR}/{user}/{action}/Analysis/mesh/{detector}/{cam}_betas.npz         (rotmats)
+            {OUT_DIR}/{user}/{action}/Analysis/mesh/{detector}/{cam}_final_betas.npz
+            {user}/user_meta.json  {"stature_m": ...}                                   (TRIAL_DIR, else OUT_DIR)
+    writes  {OUT_DIR}/{user}/{action}/Analysis/mesh/{detector}/{cam}_mesh_pose.npz
+
+With no --user / --action it does every camera with final betas from
+--detector; cameras already done are skipped (--force redoes them).  Needs a
+GPU in practice.
+
+    python3 step_3_extract_3d.py                          # everything, OpenPose
+    python3 step_3_extract_3d.py --detector yolo --user User03
 """
 
-import os
-import sys
 import argparse
 import json
+import os
+import sys
 
 os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'max_split_size_mb:512')
 
@@ -26,7 +30,8 @@ import torch
 from scipy.spatial.transform import Rotation as _Rot
 
 _SCRIPT_DIR     = os.path.dirname(os.path.abspath(__file__))
-from config import TRIAL_DIR as _TRIAL_DIR
+from config import (DETECTORS, OUT_DIR as _OUT_DIR, betas_path as _betas_path, final_betas_path as _final_path,
+                    mesh_pose_path as _mesh_path, stature_path, find_cameras, require_out_dir)
 from config import MB_DIR as _MB_DIR      # resolved in config.py; ../MotionBERT no longer holds here
 
 for _d in (_MB_DIR, _SCRIPT_DIR):
@@ -91,19 +96,7 @@ def mesh_height_from_betas(smpl, betas, device):
     y = out.vertices[0, :, 1]                     # SMPL canonical frame is y-up
     return float(y.max() - y.min())
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--user', default='User03')
-    ap.add_argument('--action', default='P03_CMJM_01')
-    ap.add_argument('--cameras', default='00,01,02,03,04,05,06,07,08')
-    args = ap.parse_args()
-    cameras = args.cameras.split(',')
-
-    _input_dir = os.path.join(_TRIAL_DIR,args.user,args.action,'Analysis','keypoints')
-    _output_dir = os.path.join(_TRIAL_DIR,args.user,args.action,'Analysis','keypoints','mesh')
-    os.makedirs(_output_dir, exist_ok=True)
-
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+def load_model(device):
     print("[init] MotionBERT-Mesh ...")
     mb_args = get_config(_MB_MESH_CFG)
     mb_args.data_root = os.path.join(_MB_DIR, 'data', 'mesh')
@@ -119,85 +112,89 @@ def main():
     if device == 'cuda':
         mesh_model = mesh_model.cuda()
     print(f"       mesh on {device}")
-
-    # Known height of the subject (crown to sole).  The mesh's own T-pose
-    # height is computed per camera below, since betas are per camera now.
-    user_meta_path = os.path.join(_TRIAL_DIR,args.user,'user_meta.json')
-    if not os.path.exists(user_meta_path):
-        raise FileNotFoundError(
-        f"{user_meta_path} not found -- step_3 needs the subject's stature "
-        f"(create it with {{\"stature_m\": <height in metres>}})")
-    with open(user_meta_path) as f:
-        user_meta = json.load(f)
-    if 'stature_m' not in user_meta:
-        raise KeyError(f"{user_meta_path} has no 'stature_m' field")
-    actual_height = user_meta['stature_m']
-
-    for camera in cameras:
-
-        # Betas from pass 1, for THIS camera only (step_2b no longer averages
-        # across views): shape evidence comes from the same single view the
-        # skeleton is placed from.
-        fb_path = os.path.join(_output_dir, f'{camera}_final_betas.npz')
-        if not os.path.exists(fb_path):
-            print(f"=== camera {camera}: no {fb_path}, skipping ===")
-            continue
-        final_betas = torch.from_numpy(np.load(fb_path)['betas']).reshape(1, 10).to(device)
-        mesh_height = mesh_height_from_betas(mesh_model.head.smpl, final_betas, device)
-        mb_scale_factor = actual_height / mesh_height
-        print(f"  mesh T-pose height {mesh_height:.3f} m, subject {actual_height:.3f} m "
-              f"-> scale x{mb_scale_factor:.3f}")
-
-        # Loading rotmats from pass 1
-        beta_cam_path = os.path.join(_output_dir,f'{camera}_betas.npz')
-        if not os.path.exists(beta_cam_path):
-            print(f"=== camera {camera}: no cached betas, skipping ===")
-            continue
-        rotmats_pass1 = torch.from_numpy(np.load(beta_cam_path)['rotmats'])
-       
-
-        path_2d = os.path.join(_input_dir, f'{camera}_2d.npz')
-        if not os.path.exists(path_2d):
-            print(f"=== camera {camera}: no cached h36m_2d, skipping ===")
-            continue
-        print(f"=== camera {camera} ===")
-        yolo_2d = np.load(path_2d)
-        h36m_2d = yolo_2d['h36m_2d']
-        n_frames = h36m_2d.shape[0]
-
-        # motion_norm = crop_scale(h36m_2d.astype(np.float32), scale_range=[1, 1])
-        # batch = torch.zeros(1, _CLIP_LEN, 17, 3, dtype=torch.float32, device=device)
-        # half = _CLIP_LEN // 2
-        all_kp_H36M_scaled = np.zeros((n_frames, 17, 3), dtype=np.float32)
-        all_kp_SMPL24_scaled = np.zeros((n_frames, 24, 3), dtype=np.float32)
-
-        for frame_n in range(n_frames):
-
-            # Loading rotmats from pass 1
-            pred_rotmats = rotmats_pass1[frame_n,1:]
-            pred_rotmats = pred_rotmats.unsqueeze(0)
-            pred_rotmats= pred_rotmats.to(device)
-            global_orient = rotmats_pass1[frame_n, 0:1]
-            global_orient = global_orient.unsqueeze(0)
-            global_orient = global_orient.to(device)
-
-            with torch.no_grad():
-                smpl_out = mesh_model.head.smpl(betas=final_betas,body_pose=pred_rotmats,global_orient=global_orient,pose2rot=False)
-            
-            kp_H36M_raw = (mesh_model.head.smpl.J_regressor_h36m @ smpl_out.vertices)[0].cpu().numpy() # extracting H36M keypoints from mesh vertices
-            all_kp_H36M_scaled[frame_n] = kp_H36M_raw * mb_scale_factor
-
-            kp_SMPL24_raw = (mesh_model.head.smpl.J_regressor @ smpl_out.vertices)[0].cpu().numpy() # extracting SMPL-24 keypoints from mesh vertices
-            all_kp_SMPL24_scaled[frame_n] = kp_SMPL24_raw * mb_scale_factor
+    return mesh_model
 
 
-            if frame_n % 100 == 0:
-                print(f"  {frame_n}/{n_frames}")
+def stature_of(user, cache={}):
+    """Crown-to-sole height (m) from user_meta.json, read once per user."""
+    if user not in cache:
+        p = stature_path(user)
+        if not os.path.exists(p):
+            raise FileNotFoundError(f"{p} not found -- step_3 needs the subject's stature "
+                                    f"(create it with {{\"stature_m\": <height in metres>}})")
+        with open(p) as f:
+            cache[user] = float(json.load(f)['stature_m'])
+    return cache[user]
 
-        out_path = os.path.join(_output_dir, f'{camera}_mesh_pose.npz')
-        np.savez(out_path, kps_H36M_scaled=all_kp_H36M_scaled, kps_SMPL24_scaled = all_kp_SMPL24_scaled, rotmats=rotmats_pass1.numpy(), scale_factor = mb_scale_factor,
-                 mesh_height_m=mesh_height, stature_m=actual_height, betas=final_betas.cpu().numpy().ravel())
-        print(f"  -> {out_path}")
+
+def build(user, action, camera, mesh_model, device, args):
+    """One camera -> {cam}_mesh_pose.npz.  Returns a summary line."""
+    actual_height = stature_of(user)
+    # Betas from pass 1, for THIS camera only (step_2b no longer averages across views):
+    # shape evidence comes from the same single view the skeleton is placed from.
+    final_betas = torch.from_numpy(np.load(_final_path(user, action, args.detector, camera))['betas']).reshape(1, 10).to(device)
+    mesh_height = mesh_height_from_betas(mesh_model.head.smpl, final_betas, device)
+    mb_scale_factor = actual_height / mesh_height
+    rotmats_pass1 = torch.from_numpy(np.load(_betas_path(user, action, args.detector, camera))['rotmats'])
+    n_frames = rotmats_pass1.shape[0]
+
+    all_kp_H36M_scaled = np.zeros((n_frames, 17, 3), dtype=np.float32)
+    all_kp_SMPL24_scaled = np.zeros((n_frames, 24, 3), dtype=np.float32)
+    for frame_n in range(n_frames):
+        pred_rotmats = rotmats_pass1[frame_n, 1:].unsqueeze(0).to(device)
+        global_orient = rotmats_pass1[frame_n, 0:1].unsqueeze(0).to(device)
+        with torch.no_grad():
+            smpl_out = mesh_model.head.smpl(betas=final_betas, body_pose=pred_rotmats, global_orient=global_orient, pose2rot=False)
+        kp_H36M_raw = (mesh_model.head.smpl.J_regressor_h36m @ smpl_out.vertices)[0].cpu().numpy()   # H36M joints from the mesh
+        all_kp_H36M_scaled[frame_n] = kp_H36M_raw * mb_scale_factor
+        kp_SMPL24_raw = (mesh_model.head.smpl.J_regressor @ smpl_out.vertices)[0].cpu().numpy()      # SMPL-24 joints from the mesh
+        all_kp_SMPL24_scaled[frame_n] = kp_SMPL24_raw * mb_scale_factor
+
+    out_path = _mesh_path(user, action, args.detector, camera)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    np.savez(out_path, kps_H36M_scaled=all_kp_H36M_scaled, kps_SMPL24_scaled=all_kp_SMPL24_scaled,
+             rotmats=rotmats_pass1.numpy(), scale_factor=mb_scale_factor, mesh_height_m=mesh_height,
+             stature_m=actual_height, betas=final_betas.cpu().numpy().ravel(), detector=np.array(args.detector))
+    return f'{n_frames} frames, mesh T-pose {mesh_height:.3f} m vs subject {actual_height:.2f} m -> scale x{mb_scale_factor:.3f}'
+
+
+def main():
+    ap = argparse.ArgumentParser(description='SMPL skeleton with fixed betas. With no --user/--action, every camera '
+                                             'with final betas from --detector; cameras already done are skipped.')
+    ap.add_argument('--detector', choices=DETECTORS, default='openpose')
+    ap.add_argument('--user', default=None, help='default: every user')
+    ap.add_argument('--action', default=None, help='default: every action (of --user, or of every user)')
+    ap.add_argument('--cameras', default=None, help='comma-separated subset; default every camera with final betas')
+    ap.add_argument('--force', action='store_true', help='redo cameras whose output already exists')
+    ap.add_argument('--dry-run', action='store_true', help='list what would be run, load nothing')
+    args = ap.parse_args()
+
+    require_out_dir()
+    jobs = find_cameras(_final_path, args.detector, args.user, args.action,
+                        set(args.cameras.split(',')) if args.cameras else None)
+    if not jobs:
+        raise SystemExit(f'no {args.detector} {{cam}}_final_betas.npz under {_OUT_DIR} for user={args.user or "*"} '
+                         f'action={args.action or "*"} -- run step_2b_finalise_betas.py first')
+    todo = [j for j in jobs if args.force or not os.path.exists(_mesh_path(j[0], j[1], args.detector, j[2]))]
+    print(f'{args.detector}: {len(jobs)} camera(s) with final betas under {_OUT_DIR}: {len(todo)} to run, '
+          f'{len(jobs) - len(todo)} already done')
+    if args.dry_run:
+        for user, action in sorted({(u, a) for u, a, _ in todo}):
+            print(f'  {user}/{action}: {",".join(c for u, a, c in todo if (u, a) == (user, action))}')
+        return
+    if not todo:
+        return
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    mesh_model = load_model(device)
+    n_done, failed = 0, []
+    for i, (user, action, cam) in enumerate(todo, 1):
+        try:
+            print(f'[{i}/{len(todo)}] {user}/{action} {cam}: {build(user, action, cam, mesh_model, device, args)}', flush=True)
+            n_done += 1
+        except Exception as e:                      # one bad camera must not stop the batch
+            failed.append((user, action, cam))
+            print(f'[{i}/{len(todo)}] {user}/{action} {cam}: FAILED -- {type(e).__name__}: {e}', flush=True)
+    print(f'\ndone {n_done}, already done {len(jobs) - len(todo)}, failed {len(failed)}')
 
 
 if __name__ == '__main__':

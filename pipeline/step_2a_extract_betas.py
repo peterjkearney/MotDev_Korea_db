@@ -24,7 +24,6 @@ them at (0,0,0) as the pipeline once did (tools/ladder.py's rung C).
 """
 
 import argparse
-import glob
 import os
 import sys
 
@@ -35,7 +34,7 @@ import torch
 from scipy.spatial.transform import Rotation as _Rot
 
 _SCRIPT_DIR     = os.path.dirname(os.path.abspath(__file__))
-from config import DETECTORS, twod_path as _twod_path, betas_path as _betas_path, require_out_dir, OUT_DIR as _OUT_DIR
+from config import DETECTORS, twod_path as _twod_path, betas_path as _betas_path, require_out_dir, OUT_DIR as _OUT_DIR, find_cameras
 from config import MB_DIR as _MB_DIR      # resolved in config.py; ../MotionBERT no longer holds here
 
 for _d in (_MB_DIR, _SCRIPT_DIR):
@@ -104,17 +103,6 @@ def load_model(device):
     return mesh_model
 
 
-def find_cameras(detector, user=None, action=None, cameras=None):
-    """[(user, action, cam)] for every {cam}_2d.npz of this detector under OUT_DIR."""
-    out = []
-    for p in sorted(glob.glob(_twod_path(user or '*', action or '*', detector, '*'))):
-        cam = os.path.basename(p)[:-7]
-        a = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(p))))   # .../{user}/{action}
-        if cameras is None or cam in cameras:
-            out.append((os.path.basename(os.path.dirname(a)), os.path.basename(a), cam))
-    return out
-
-
 def extract(user, action, camera, mesh_model, device, args):
     """One camera's 2D -> {cam}_betas.npz.  Returns a summary line."""
     h36m_2d = np.load(_twod_path(user, action, args.detector, camera))['h36m_2d']
@@ -169,7 +157,7 @@ def main():
     args = ap.parse_args()
 
     require_out_dir()
-    jobs = find_cameras(args.detector, args.user, args.action, set(args.cameras.split(',')) if args.cameras else None)
+    jobs = find_cameras(_twod_path, args.detector, args.user, args.action, set(args.cameras.split(',')) if args.cameras else None)
     if not jobs:
         raise SystemExit(f'no {args.detector} {{cam}}_2d.npz under {_OUT_DIR} for user={args.user or "*"} '
                          f'action={args.action or "*"} -- run step_1_extract_2d.py / step_1_openpose_2d.py first')

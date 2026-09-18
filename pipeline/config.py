@@ -67,6 +67,42 @@ def betas_path(user, action, detector, cam):
     return os.path.join(analysis_dir(user, action), 'mesh', detector, f'{cam}_betas.npz')
 
 
+def final_betas_path(user, action, detector, cam):
+    """step_2b: the one body shape (10 betas) this camera's skeleton is built with."""
+    return os.path.join(analysis_dir(user, action), 'mesh', detector, f'{cam}_final_betas.npz')
+
+
+def mesh_pose_path(user, action, detector, cam):
+    """step_3: H36M-17 and SMPL-24 joints per frame from SMPL (fixed betas + pass-1 rotations),
+    scaled to the subject's stature, in the mesh's own camera-facing frame (not yet placed)."""
+    return os.path.join(analysis_dir(user, action), 'mesh', detector, f'{cam}_mesh_pose.npz')
+
+
+def stature_path(user):
+    """user_meta.json ({"stature_m": ...}): with the local copy of the data, else on Drive."""
+    for root in (TRIAL_DIR, OUT_DIR):
+        p = os.path.join(root, user, 'user_meta.json')
+        if os.path.exists(p):
+            return p
+    return os.path.join(TRIAL_DIR, user, 'user_meta.json')
+
+
+def find_cameras(path_fn, detector, user=None, action=None, cameras=None):
+    """[(user, action, cam)] for every file `path_fn(user, action, detector, cam)` under OUT_DIR,
+    narrowed by --user / --action / --cameras when given.  How the batch steps discover work."""
+    import glob
+    out = []
+    for p in sorted(glob.glob(path_fn(user or '*', action or '*', detector, '*'))):
+        suffix = os.path.basename(path_fn('u', 'a', detector, ''))          # e.g. '_2d.npz'
+        cam = os.path.basename(p)[:-len(suffix)]
+        if '_' in cam:        # '*_betas.npz' also matches '00_final_betas.npz'; camera names have no '_'
+            continue
+        a = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(p))))   # .../{user}/{action}
+        if cameras is None or cam in cameras:
+            out.append((os.path.basename(os.path.dirname(a)), os.path.basename(a), cam))
+    return out
+
+
 def require_out_dir():
     """A path under /content/drive with Drive not mounted is silently created on the
     VM's own disk and lost with the runtime -- stop instead."""
