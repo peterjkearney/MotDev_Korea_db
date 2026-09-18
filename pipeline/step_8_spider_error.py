@@ -223,7 +223,13 @@ def score_trial(user, action, cameras, args):
             gt_world_mm = gt_loo[camera]               # triangulated WITHOUT this camera
         else:
             gt_world_mm = mocap_world_mm
-        mocap_cam_mm = gt_world_mm[source_frame_idx[:T]] @ R.T + t
+        # The video can outrun the ground truth by a few frames (OpenPose's rows come from the
+        # video, mocap stops when it stops): rows past its end have no target and score as NaN.
+        sfi = np.asarray(source_frame_idx[:T], int)
+        gt_rows = np.full((T, 17, 3), np.nan)
+        in_gt = sfi < len(gt_world_mm)
+        gt_rows[in_gt] = gt_world_mm[sfi[in_gt]]
+        mocap_cam_mm = gt_rows @ R.T + t
         mocap_cam_m = mocap_cam_mm / 1000.0            # (T,17,3)
 
         joint_ok = mocap_valid_joint_mask[None, :] & ~np.isnan(mocap_cam_m).any(axis=-1)  # (T,17)
