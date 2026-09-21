@@ -3,16 +3,20 @@
 
 Stream 2 (children).  Reads the per-rep files build_child_gt.py wrote under
 GT3D/ and writes, for every usable rep, the trial layout the rest of the
-pipeline expects -- so steps 2a, 2b, 3, 4, 6 and 8 run on children unchanged:
+pipeline expects -- so steps 2a, 2b, 3, 4, 5, 6 and 8 run on children unchanged:
 
-    {TRIAL_DIR}/{subject}/user_meta.json                     stature (step_3)
-    {TRIAL_DIR}/{subject}/{cam}.mp4-mocAligned.calib         K, L_ext (step_4, step_8)
-    {TRIAL_DIR}/{subject}/{rep}/Analysis/keypoints/{cam}_2d.npz
-                                                             OpenPose H36M 2D (step_2a)
-    {TRIAL_DIR}/{subject}/{rep}/Analysis/keypoints/openpose_tri_h36m.npz
-                                                             target, mocap_h36m.npz layout
+    {OUT_DIR}/{subject}/user_meta.json                                       stature (step_3)
+    {OUT_DIR}/{subject}/{cam}.mp4-mocAligned.calib                           K, L_ext (step_4, step_8)
+    {OUT_DIR}/{subject}/{rep}/Analysis/keypoints/openpose/{cam}_2d.npz       OpenPose 2D (step_2a)
+    {OUT_DIR}/{subject}/{rep}/Analysis/H36M/openpose_tri_h36m.npz            target, mocap_h36m.npz layout
 
 Here user = subject (B010), action = rep (B010_GMS_1_1), cameras = 1, 2, 3.
+OUT_DIR is config's output root: point BIOCV_OUT at the KOREA folder on Drive
+before running this and every later step, e.g.
+    %env BIOCV_OUT=/content/drive/MyDrive/MotorDevelopment/Data/Korea
+There is no local copy of anything for this dataset (no videos, no mocap), so
+the calibs and stature live in OUT_DIR too, where config.calib_path and
+config.stature_path look second.  Reps already laid out are skipped (--force).
 
 Frames.  BioCV's "lab" frame is the mocap frame, Z up.  For Korea the lab
 frame is the fitted floor frame: Z up, origin on the floor under camera 1.
@@ -37,7 +41,7 @@ import os
 
 import numpy as np
 
-from config import TRIAL_DIR as _TRIAL_DIR
+from config import OUT_DIR as _OUT_DIR, twod_path as _twod_path, tri_target_path as _tri_path, require_out_dir
 from utils.calibration import save_calib
 from utils.openpose import H36M_NAMES, body25_to_h36m_2d
 
@@ -47,11 +51,12 @@ EVAL_EXCLUDE = ('Nose', 'Head', 'Spine')   # synthesised joints; see step_1b_tri
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--gt3d', required=True, help='build_child_gt.py output root')
-    ap.add_argument('--trial-dir', default=_TRIAL_DIR)
     ap.add_argument('--subjects', default=None)
     ap.add_argument('--include-unusable', action='store_true',
                     help='also lay out reps flagged unusable (still marked in the target)')
+    ap.add_argument('--force', action='store_true', help='redo reps already laid out')
     args = ap.parse_args()
+    require_out_dir()
 
     subs = sorted(os.path.basename(p) for p in glob.glob(os.path.join(args.gt3d, 'B*'))
                   if os.path.isdir(p))
@@ -59,7 +64,7 @@ def main():
         want = set(args.subjects.split(','))
         subs = [s for s in subs if s in want]
 
-    n_reps = n_sub = 0
+    n_reps = n_sub = n_skip = 0
     for sub in subs:
         summ_path = os.path.join(args.gt3d, sub, 'session_summary.json')
         if not os.path.exists(summ_path):
@@ -71,7 +76,7 @@ def main():
         reps = sorted(glob.glob(os.path.join(args.gt3d, sub, f'{sub}_*.npz')))
         if not reps:
             continue
-        udir = os.path.join(args.trial_dir, sub)
+        udir = os.path.join(_OUT_DIR, sub)
         os.makedirs(udir, exist_ok=True)
         wrote_session = False
 
@@ -80,6 +85,9 @@ def main():
             if not bool(d['usable']) and not args.include_unusable:
                 continue
             stub = str(d['stub'])
+            if os.path.exists(_tri_path(sub, stub)) and not args.force:      # the target is written last
+                n_skip += 1
+                continue
             cams = [str(c) for c in d['cameras']]
             T = d['h36m_2d'].shape[1]
             fps = float(d['fps'])
@@ -103,9 +111,6 @@ def main():
                 wrote_session = True
                 n_sub += 1
 
-            kp_dir = os.path.join(udir, stub, 'Analysis', 'keypoints')
-            os.makedirs(kp_dir, exist_ok=True)
-
             # 2D input per camera, in step_1's file layout
             for c, cam in enumerate(cams):
                 xy = d['xy_openpose_1080'][c]
@@ -113,7 +118,8 @@ def main():
                 body25 = np.concatenate([xy, cf[..., None]], axis=-1).astype(np.float32)
                 # source_frame_idx indexes the aligned rows (what the target uses);
                 # video_frame_idx is the frame of the (sync-offset) source video.
-                np.savez(os.path.join(kp_dir, f'{cam}_2d.npz'),
+                os.makedirs(os.path.dirname(_twod_path(sub, stub, 'openpose', cam)), exist_ok=True)
+                np.savez(_twod_path(sub, stub, 'openpose', cam),
                          h36m_2d=d['h36m_2d'][c].astype(np.float32), body25_2d=body25,
                          source_frame_idx=np.arange(T), video=str(d['video_path'][c]),
                          video_frame_idx=d['video_frame_idx'][c],
@@ -142,7 +148,8 @@ def main():
                 if m.any():
                     assert np.abs(back[m] - ref[m]).max() < 1e-4, 'calib/target frame mismatch'
 
-            np.savez(os.path.join(kp_dir, 'openpose_tri_h36m.npz'),
+            os.makedirs(os.path.dirname(_tri_path(sub, stub)), exist_ok=True)
+            np.savez(_tri_path(sub, stub),
                      kps3d=X3.astype(np.float32), kps3d_loo=loo, cameras=np.array(cams),
                      source_frame_idx=np.arange(T), fps=fps, units=np.array('mm'),
                      valid_joint_mask=np.array([n not in EVAL_EXCLUDE for n in H36M_NAMES]),
@@ -151,7 +158,7 @@ def main():
                      stature_mm=float(d['stature_m']) * 1000.0)
             n_reps += 1
         print(f'{sub}: laid out {n_reps} reps so far -> {udir}')
-    print(f'\n{n_sub} subjects, {n_reps} reps under {args.trial_dir}')
+    print(f'\n{n_sub} subjects, {n_reps} reps laid out under {_OUT_DIR}, {n_skip} already there')
 
 
 if __name__ == '__main__':

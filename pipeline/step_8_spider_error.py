@@ -175,8 +175,12 @@ def score_trial(user, action, cameras, args):
     mocap_world_mm = mocap_data['kps3d']                     # (T,17,3) mm, world/lab-space
     mocap_valid_joint_mask = mocap_data['valid_joint_mask']  # (17,) False for Nose/Head
     # leave-one-out targets: one per held-out camera, keyed by label
+    # The all-camera triangulation is the best estimate of the truth and the default target.
+    # --tri loo scores each camera against the target built WITHOUT it instead, so that the
+    # camera's own 2D does not shape what it is scored against -- at the cost of a weaker
+    # target, which with three cameras and estimated calibration is the worse trade.
     gt_loo = None
-    if args.gt == 'triangulated':
+    if args.gt == 'triangulated' and args.tri == 'loo':
         gt_loo = {str(c): mocap_data['kps3d_loo'][i] for i, c in enumerate(mocap_data['cameras'])}
 
     stature_mm = None
@@ -343,7 +347,7 @@ def score_trial(user, action, cameras, args):
     ax.set_xticks(theta)
     ax.set_xticklabels([f'cam {c}\n{a:.0f}\N{DEGREE SIGN}' for c, a in zip(labels, angles)])
     ax.set_ylabel('mean 3D joint error (mm)', labelpad=30)
-    ax.set_title(f'PnP vs {"mocap" if args.gt == "mocap" else "triangulated OpenPose (LOO)"}: '
+    ax.set_title(f'PnP vs {"mocap" if args.gt == "mocap" else "triangulated OpenPose (" + ("leave-one-out" if args.tri == "loo" else "all cameras") + ")"}: '
                  f'mean 3D joint error by camera\n{user} / {action} ({args.detector})', pad=24)
     ax.legend(loc='lower left', bbox_to_anchor=(-0.15, -0.15), fontsize=7)
 
@@ -360,7 +364,8 @@ def score_trial(user, action, cameras, args):
     metrics_path = _metrics_path(user, action, args.detector, args.gt)
     ex = [extras[i] for i in order]
     np.savez(metrics_path,
-             gt=np.array(args.gt), detector=np.array(args.detector), stature_mm=np.array(stature_mm if stature_mm else np.nan),
+             gt=np.array(args.gt), tri=np.array(args.tri if args.gt == 'triangulated' else ''),
+             detector=np.array(args.detector), stature_mm=np.array(stature_mm if stature_mm else np.nan),
              pa_mpjpe=np.array([e['pa_mpjpe'] for e in ex]),
              n_mpjpe=np.array([e['n_mpjpe'] for e in ex]),
              perjoint_pa=np.array([e['perjoint_pa'] for e in ex]),
@@ -398,6 +403,9 @@ def main():
     ap.add_argument('--gt', choices=['mocap', 'triangulated'], default='mocap',
                     help='ground truth: mocap, or the triangulated OpenPose target '
                          '(leave-one-out per camera -- the only option for Korea, and the like-for-like one for BioCV)')
+    ap.add_argument('--tri', choices=['all', 'loo'], default='all',
+                    help='with --gt triangulated: the all-camera solution (default) or, per camera, the '
+                         'leave-one-out target built without it')
     ap.add_argument('--verbose', action='store_true', help='print every camera, not just the trial summary')
     ap.add_argument('--force', action='store_true', help='redo trials already scored against this --gt')
     ap.add_argument('--dry-run', action='store_true', help='list what would be scored')

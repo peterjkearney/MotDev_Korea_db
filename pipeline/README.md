@@ -27,9 +27,13 @@ triangulated-target results.
   to projected mocap, writes the same `{cam}_2d.npz` (plus `body25_2d`).
 - **`step_1b_triangulate_2d.py`** builds the triangulated-OpenPose target
   on BioCV from the known calibration: `openpose_tri_h36m.npz`, in
-  `mocap_h36m.npz`'s layout.  Targets are leave-one-out — the target for
-  camera *c* is triangulated without camera *c*, so the input never shapes
-  the target it is scored against.
+  `mocap_h36m.npz`'s layout.  It holds the all-camera triangulation and, per
+  camera, a leave-one-out one.  **Scoring and renders use the all-camera
+  solution**: the question is how close lifting + placement gets to the truth,
+  and that is the best estimate of it -- with three cameras and estimated
+  calibration on Korea the leave-one-out target is too weak to be the
+  yardstick.  `--tri loo` (step_5, step_8) selects it where the circularity of
+  scoring a camera against a target its own 2D helped build matters more.
 - **`step_1_korea_2d.py`** lays the Korea `GT3D/` output out as trials
   (`user` = subject, `action` = rep, cameras `1,2,3`), with calibs,
   `user_meta.json` and leave-one-out targets, so steps 2a–8 run unchanged.
@@ -102,9 +106,8 @@ openpose|yolo` (default openpose) says whose 2D a step works from, and its
 outputs go to a matching subfolder.  Run with no `--user` / `--action` they
 do every trial, skip what is already done (`--force` to redo) and carry on
 past a failure, so re-running after a disconnect resumes; `--dry-run` lists
-the work.  **Still on the old layout:** the renders `step_7` and `tools/render_compare.py`,
-`tools/run_batch.py`, `tools/ladder.py`, `tools/check_sync.py` and the Korea layout
-script `step_1_korea_2d.py`.
+the work.  **Still on the old layout:** the `step_7` render,
+`tools/run_batch.py`, `tools/ladder.py` and `tools/check_sync.py`.
 
 ## Stream 1 — adults, OpenPose
 
@@ -159,13 +162,24 @@ python3 tools/run_batch.py --gt mocap --steps step_8      # second table, same r
 
 ## Stream 2 — children, Korea
 
-Copy `Korea/B/GT3D/` (from `build_child_gt.py`) to Colab, then:
+The steps are not BioCV-specific: they take every path from `config.py`, which
+reads `BIOCV_ROOT` / `BIOCV_OUT` from the environment, and find their work by
+looking for files under the output root.  So the children run through the same
+commands once the output root points at a Korea folder and the GT3D files
+(from `build_child_gt.py`) are laid out in it as trials:
 
 ```
-python3 step_1_korea_2d.py --gt3d /content/data/Korea/GT3D      # writes into $BIOCV_ROOT
-python3 tools/run_batch.py --gt triangulated \
-    --steps step_2a,step_2b,step_3,step_4,step_8
+%env BIOCV_OUT=/content/drive/MyDrive/MotorDevelopment/Data/Korea
+python3 step_1_korea_2d.py --gt3d /content/drive/MyDrive/.../Korea/B/GT3D    # user = subject, action = rep, cameras 1,2,3
+python3 step_2a_extract_betas.py ; python3 step_2b_finalise_betas.py ; python3 step_3_extract_3d.py
+python3 step_4_PnP.py ; python3 step_6_extract_features.py
+python3 step_8_spider_error.py --gt triangulated
+python3 step_5_mocap_comparison.py
 ```
+
+There is no local copy of anything for this dataset, so the layout step puts
+the calibs and `user_meta.json` in the output root too, where `config` looks
+second.  Everything skips what is already done.
 
 Only reps `build_child_gt.py` marked usable are laid out
 (`--include-unusable` to override).  Frames that failed its per-frame gates
@@ -211,18 +225,19 @@ lands in the work root, so `run_batch.py` never sees the variants.
 ## Looking at a trial
 
 ```
-python3 tools/render_compare.py --user B010 --action B010_GMS_1_1 --camera 1
-python3 tools/render_compare.py --user User08 --action P08_CMJM_01 --camera 07 --gt mocap
+python3 step_5_mocap_comparison.py --user User03 --action P03_CMJM_01 --cameras 06,07      # BioCV
+python3 step_5_mocap_comparison.py --user B010 --action B010_GMS_1_1                        # Korea
 ```
 
-Writes `Analysis/diagnostics/compare_{cam}[_tri].mp4`: the camera view with
-OpenPose's 2D, the placed MotionBERT skeleton and the ground truth projected
-onto it (over the source video if it is next to the trial), plus side and
-top-down views of the two 3D skeletons.  The all-camera skeleton is drawn by
-default because it exists on more frames; `--gt-source loo` draws the
-leave-one-out target step_8 actually scores.  It only needs `Analysis/`, so
-pointing `BIOCV_ROOT` at `RESULTS_DIR` renders straight from the synced
-outputs without re-running anything.
+Left, the camera's view with the smoothed PnP-placed skeleton from each
+detector (OpenPose blue, YOLO green) over the source video; right, top-down
+in the camera's frame with mocap, the all-camera triangulated target and the
+same skeletons, fixed axes, clip-level MPJPE in the legend.  Korea has no
+footage and no mocap: the left panel is then a blank canvas of the camera's
+size carrying the dataset's OpenPose keypoints (yellow) and the triangulated
+target projected into the camera (orange) as well, and the error is against
+the triangulated target.  `--draw-2d` / `--draw-target` add those layers
+over a video too.  Written to `Analysis/diagnostics/{cam}_pnp_depth_vs_mocap.mp4`.
 
 ## Checking OpenPose against the mocap by eye
 
