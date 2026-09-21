@@ -92,16 +92,17 @@ writes it and every step that reads it.
 {OUT_DIR}/{user}/{action}/Analysis/mesh/{detector}/{cam}_final_betas.npz         step_2b
 {OUT_DIR}/{user}/{action}/Analysis/mesh/{detector}/{cam}_mesh_pose.npz           step_3
 {OUT_DIR}/{user}/{action}/Analysis/PnP/{detector}/{cam}_pnp.npz                  step_4
+{OUT_DIR}/{user}/{action}/Analysis/diagnostics/{cam}_pnp_depth_vs_mocap.mp4        step_5 (both detectors)
 {OUT_DIR}/{user}/{action}/Analysis/features/{detector}/{cam}_features.npz        step_6
 {OUT_DIR}/{user}/{action}/Analysis/diagnostics/{detector}/error_metrics[_tri].npz, spider_error_*.png   step_8 (--gt)
 ```
 
-Steps 0 to 8 (except the renders, 5 and 7) are moved.  From 2a on, `--detector
+Steps 0 to 8 are moved, except the step_7 render.  From 2a on, `--detector
 openpose|yolo` (default openpose) says whose 2D a step works from, and its
 outputs go to a matching subfolder.  Run with no `--user` / `--action` they
 do every trial, skip what is already done (`--force` to redo) and carry on
 past a failure, so re-running after a disconnect resumes; `--dry-run` lists
-the work.  **Still on the old layout:** the renders (`step_5`, `step_7`, `tools/render_compare.py`),
+the work.  **Still on the old layout:** the renders `step_7` and `tools/render_compare.py`,
 `tools/run_batch.py`, `tools/ladder.py`, `tools/check_sync.py` and the Korea layout
 script `step_1_korea_2d.py`.
 

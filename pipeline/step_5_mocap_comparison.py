@@ -1,360 +1,209 @@
 #!/usr/bin/env python3
+"""step_5_mocap_comparison.py -- see the result: both detectors' skeletons on the video, and
+how their DEPTH compares with the ground truths, which a 2D overlay alone cannot show (a
+reprojection can look perfect while the skeleton is a metre too deep).
+
+LEFT   the source video with the smoothed, PnP-placed H36M skeleton from each detector
+       projected through the camera: OpenPose in blue, YOLO in green.
+RIGHT  top-down (X vs depth, this camera's frame, metres), this frame only, fixed axes:
+       mocap (red), the triangulated-OpenPose target (orange), and the same two smoothed
+       skeletons.  Clip-level MPJPE against mocap is in the legend.
+
+    reads   {TRIAL_DIR}/{user}/{action}/{cam}.mp4                          (or --videos DIR)
+            {OUT_DIR}/.../Analysis/PnP/{openpose,yolo}/{cam}_pnp.npz        (step_4; also K, dist, L_ext)
+            {OUT_DIR}/.../Analysis/keypoints/{openpose,yolo}/{cam}_2d.npz   (frame numbers)
+            {OUT_DIR}/.../Analysis/H36M/mocap_h36m.npz, openpose_tri_h36m.npz
+    writes  {OUT_DIR}/.../Analysis/diagnostics/{cam}_pnp_depth_vs_mocap.mp4
+            (rendered on local disk, then copied)
+
+A detector with no PnP result for a camera is simply left out; so is the triangulated target
+if step_1b has not run.  The triangulated skeleton drawn is the all-camera solution, which
+exists on the most frames; --tri loo draws the leave-one-out target step_8 scores against.
+
+Frames.  Mocap is at the native 200 Hz and both 2D files carry the native frame number of
+every row, so everything is looked up by that number; the two detectors' lists can differ by
+a row or two at the end (YOLO's comes from the mocap's length, OpenPose's from the video's),
+and the video covers their union.
+
+With no --user / --action it does every camera that has a PnP result and whose video is in
+the local copy; cameras already rendered are skipped (--force redoes them).
+
+    python3 step_5_mocap_comparison.py --user User03 --action P03_CMJM_01 --cameras 06,07
+    python3 step_5_mocap_comparison.py --user User03 --dry-run
 """
-step_5b_mocap_comparison.py — step_4_render_overlay.py's front/video overlay
-panel (YOLO + placed H36M-17 + placed SMPL-24, unchanged), with a second
-panel added on the right: a top-down (X vs Z) comparison of step_3_PnP.py's
-placed H36M-17 markers against the real mocap ground truth
-(step_0_load_mocap.py), both drawn for the SAME frame -- to see directly how
-accurate the model's solved DEPTH (Z, into the scene) actually is, which the
-front panel's 2D reprojection can't reveal (a reprojection can look perfect
-in 2D while still being wrong in depth).
-
-Reads:
-    Analysis/keypoints/PnP/{cam}_pnp.npz       (step_3_PnP.py; also
-                                                       carries this camera's
-                                                       K / dist_cv / L_ext)
-    Analysis/keypoints/{cam}_2d.npz            (step_1_extract_2d.py)
-    Analysis/H36M/mocap_h36m.npz               (step_0_load_mocap.py; under OUT_DIR)
-    {user}/{action}/{cam}.mp4                        (source video)
-
-Mocap's kps3d is in the c3d file's own WORLD-space millimetres (see
-step_0_load_mocap.py's docstring). Converted into THIS camera's real
-camera-space via cam_L_ext (R_ext, t_ext) -- the same transform
-render_avatar_overlay.py uses for its Hip-only mocap overlay
-(R_ext @ p_world + t_ext, then mm -> m), applied here to every joint at
-once rather than just the root.
-
-Frame-index alignment: mocap is kept at native (200Hz) resolution by
-step_0_load_mocap.py -- no decimation, so mocap_h36m.npz's source_frame_idx
-is just arange(n_native_frames) (checked below). Video and mocap share the
-identical native capture rate (confirmed: both 200Hz for every trial), so a
-camera frame's own native index (src_idx, from step_1_extract_2d.py) already
-means the same real instant in mocap's stream too -- mocap is looked up by
-indexing directly with src_idx, bounds-checked against mocap's own native
-length, rather than by matching two independently-decimated index arrays
-(which, empirically, are not guaranteed to agree frame-for-frame).
-
-Saved to Analysis/diagnostics/{cam}_pnp_depth_vs_mocap.mp4.
-
-Run inside the motor-dev container:
-    docker run --rm --runtime nvidia \
-      -v /ssd/MotorDevelopment:/ssd/MotorDevelopment \
-      -w /ssd/MotorDevelopment/Python/PnP_depth_clean \
-      motor-dev:latest \
-      python3 step_5_mocap_comparison.py --user User28 --action P28_CMJM_01
-"""
-
-import os
 import argparse
+import os
+import shutil
+import tempfile
 
-import numpy as np
 import cv2
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+import numpy as np
 
+from config import (DETECTORS, TRIAL_DIR as _TRIAL_DIR, OUT_DIR as _OUT_DIR, mocap_path as _mocap_path,
+                    tri_target_path as _tri_path, twod_path as _twod_path, pnp_path as _pnp_path,
+                    depth_video_path as _video_out, find_cameras, require_out_dir)
 from utils.calibration import reproject
+from utils.metrics import mpjpe
+from utils.topdown import TopDown, H36M_LIMBS, hex_bgr, robust_limits
 
-from config import TRIAL_DIR as _TRIAL_DIR, mocap_path as _mocap_path
-
-# H36M-17 kinematic bone pairs -- matches diagnose_frame.py's LIMBS and
-# step_4_render_overlay.py's H36M_LIMBS. Mocap's kps3d uses this SAME joint
-# order (step_0_load_mocap.py's own design), so the same pairs apply to both.
-H36M_LIMBS = [(0, 1), (1, 2), (2, 3), (0, 4), (4, 5), (5, 6),
-              (0, 7), (7, 8), (8, 9), (9, 10),
-              (8, 11), (11, 12), (12, 13), (8, 14), (14, 15), (15, 16)]
-
-# Standard SMPL-24 kinematic tree -- matches _SMPL_PARENTS in main_3d_mb_mesh_window.py.
-_SMPL_PARENTS = [-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9,
-                 12, 13, 14, 16, 17, 18, 19, 20, 21]
-SMPL24_BONES = [(i, p) for i, p in enumerate(_SMPL_PARENTS) if p != -1]
-
-_COL_YOLO = (0, 140, 255)      # orange, BGR -- real 2D detections
-_COL_H36M = (255, 60, 0)       # blue, BGR -- reprojected placed H36M-17
-_COL_SMPL24 = (60, 200, 60)    # green, BGR -- reprojected placed SMPL-24
-_PNP_CONF_THRESH = 0.4
-# A joint at/behind the camera plane (depth <= this) blows up to inf/huge
-# values under cv2.projectPoints' pinhole division, which then overflows
-# cv2.line's int32 parsing (not caught by an np.isnan check, since inf/huge
-# values are finite) -- see conversation history for the direct repro.
-_MIN_DEPTH_M = 0.05
-
-_TD_PANEL_W = 640   # top-down panel width in px; height matches the video's own h
-_TD_COL_H36M = '#4b5563'     # grey -- placed MotionBERT H36M
-_TD_COL_H36M_SMOOTH = '#2a78d6'     # blue -- smooth MotionBERT H36M
-_TD_COL_MOCAP = '#FF0000'    # red -- mocap ground truth
-_TD_COL_GRID = '#c7cdd4'
-_TD_COL_INK = '#4b5563'
+DET_LABEL = {'openpose': 'OpenPose', 'yolo': 'YOLO'}
+DET_HEX = {'openpose': '#2a78d6', 'yolo': '#1baf7a'}
+_MOCAP_HEX, _TRI_HEX = '#e0322b', '#eb6834'
+_MIN_DEPTH_M = 0.05        # a joint at/behind the camera plane blows up under projection
+_TD_PANEL_W = 640
 
 
-def draw_points_and_bones(img, pts2d, bones, color, radius=3, thickness=2):
-    for a, b in bones:
-        pa = tuple(pts2d[a].astype(int))
-        pb = tuple(pts2d[b].astype(int))
-        cv2.line(img, pa, pb, color, thickness, cv2.LINE_AA)
+def draw_skeleton(img, pts2d, color, radius=3, thickness=2):
+    for a, b in H36M_LIMBS:
+        cv2.line(img, tuple(pts2d[a].astype(int)), tuple(pts2d[b].astype(int)), color, thickness, cv2.LINE_AA)
     for p in pts2d:
         cv2.circle(img, tuple(p.astype(int)), radius, color, -1, cv2.LINE_AA)
 
 
-def compute_topdown_limits(h36m_xz, mocap_xz):
-    """Fixed axis limits from the whole clip's valid range of both datasets,
-    computed once so the panel doesn't rescale frame to frame."""
-    x_vals = [h36m_xz[..., 0][~np.isnan(h36m_xz[..., 0])],
-              mocap_xz[..., 0][~np.isnan(mocap_xz[..., 0])]]
-    z_vals = [h36m_xz[..., 1][~np.isnan(h36m_xz[..., 1])],
-              mocap_xz[..., 1][~np.isnan(mocap_xz[..., 1])]]
-    all_x = np.concatenate(x_vals)
-    all_z = np.concatenate(z_vals)
-    if all_x.size == 0 or all_z.size == 0:
-        return (-1.0, 1.0), (-0.3, 2.0)
-    x_half = max(float(np.abs(all_x).max()) * 1.15, 0.5)
-    z_max = max(float(all_z.max()) * 1.15, 1.0)
-    return (-x_half, x_half), (-0.3, z_max)
+def render(user, action, cam, video, args):
+    """One camera -> the comparison video.  Returns a summary line."""
+    dets = {}
+    for d in DETECTORS:
+        pp, tp = _pnp_path(user, action, d, cam), _twod_path(user, action, d, cam)
+        if os.path.exists(pp) and os.path.exists(tp):
+            pnp, twod = np.load(pp), np.load(tp)
+            n = min(len(pnp['kps_H36M_smooth']), len(twod['source_frame_idx']))
+            dets[d] = dict(smooth=pnp['kps_H36M_smooth'][:n], sfi=twod['source_frame_idx'][:n].astype(int),
+                           fps=float(twod['fps']), pnp=pnp)
+    if not dets:
+        raise FileNotFoundError('no PnP result from either detector')
+    ref = next(iter(dets.values()))['pnp']                   # K, dist and L_ext are the camera's, same in both
+    K, dist_cv, L_ext = ref['cam_K'], ref['cam_dist_cv'], ref['cam_L_ext']
+    R_ext, t_ext = L_ext[:3, :3], L_ext[:3, 3]
+    to_cam_m = lambda world_mm: (world_mm @ R_ext.T + t_ext) / 1000.0
 
+    mocap = np.load(_mocap_path(user, action))
+    assert np.array_equal(mocap['source_frame_idx'], np.arange(len(mocap['source_frame_idx']))), \
+        'mocap_h36m.npz looks decimated, not native-resolution -- re-run step_0_load_mocap.py'
+    mocap_cam, mocap_joint_ok = to_cam_m(mocap['kps3d']), mocap['valid_joint_mask'].astype(bool)
+    tri_cam = tri_joint_ok = None
+    if os.path.exists(_tri_path(user, action)):
+        tri = np.load(_tri_path(user, action))
+        world = tri['kps3d']
+        if args.tri == 'loo':
+            cams = [str(c) for c in tri['cameras']]
+            if cam in cams:
+                world = tri['kps3d_loo'][cams.index(cam)]
+        tri_cam, tri_joint_ok = to_cam_m(world), np.ones(17, bool)      # draw every joint it solved
 
-def _hex_to_bgr(hex_col, fade_towards_white=0.0):
-    """matplotlib colour -> cv2 BGR tuple; fade_towards_white in [0,1) emulates
-    alpha on the white panel background (cv2 primitives have no alpha)."""
-    r, g, b = matplotlib.colors.to_rgb(hex_col)
-    f = fade_towards_white
-    return tuple(int(255 * (c * (1 - f) + f)) for c in (b, g, r))
+    # clip-level error vs mocap, for the legend
+    err = {}
+    for d, r in dets.items():
+        gt = np.full_like(r['smooth'], np.nan)
+        inr = r['sfi'] < len(mocap_cam)
+        gt[inr] = mocap_cam[r['sfi'][inr]]
+        err[d] = 1000 * np.nanmean(mpjpe(r['smooth'], gt, np.broadcast_to(mocap_joint_ok, gt.shape[:2]))[0])
 
+    cap = cv2.VideoCapture(video)
+    W, H = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    native = np.unique(np.concatenate([r['sfi'] for r in dets.values()]))
+    row = {d: {int(n): i for i, n in enumerate(r['sfi'])} for d, r in dets.items()}
+    shown = [mocap_cam[native[native < len(mocap_cam)]][..., [0, 2]]] + [r['smooth'][..., [0, 2]] for r in dets.values()]
+    if tri_cam is not None:
+        shown.append(tri_cam[native[native < len(tri_cam)]][..., [0, 2]])
+    xlim, zlim = robust_limits(shown)
+    legend = [('mocap', _MOCAP_HEX, 1.0)]
+    if tri_cam is not None:
+        legend.append(('triangulated OpenPose' + (' (leave-one-out)' if args.tri == 'loo' else ' (all cameras)'), _TRI_HEX, 1.0))
+    legend += [(f'H36M from {DET_LABEL[d]}, smoothed: MPJPE {err[d]:.0f} mm', DET_HEX[d], 1.0) for d in dets]
+    panel = TopDown(_TD_PANEL_W, H, float(np.arctan(W / (2 * K[0, 0]))), xlim, zlim,
+                    f'top-down, camera {cam}\n{user} / {action}', legend)
 
-class TopDownPanel:
-    """Static top-down panel (FOV cone, camera marker, grid, labels, legend)
-    rendered by matplotlib ONCE per camera; the three per-frame skeletons are
-    composited onto a copy with cv2 using the captured data->pixel transform,
-    so the per-frame cost is a few dozen line draws instead of a full figure
-    re-render (same approach as step_7_animate.py's ChartPanel)."""
-
-    def __init__(self, width, height, half_fov_x_rad, xlim, zlim, dpi=100):
-        fig, ax = plt.subplots(figsize=(width / dpi, height / dpi), dpi=dpi)
-        fig.patch.set_facecolor('white')
-        fig.subplots_adjust(left=0.16, right=0.97, top=0.93, bottom=0.10)
-        ax.set_facecolor('white')
-
-        cone_len = zlim[1] * 1.05
-        for sign in (-1, 1):
-            ax.plot([0, sign * cone_len * np.sin(half_fov_x_rad)],
-                     [0, cone_len * np.cos(half_fov_x_rad)],
-                     color=_TD_COL_INK, lw=1.1, ls='--', alpha=0.6)
-        ax.plot(0, 0, marker='^', markersize=8, color=_TD_COL_INK)
-        ax.text(0, -0.22, 'camera', color=_TD_COL_INK, fontsize=7.5, ha='center')
-
-        ax.set_xlim(*xlim)
-        ax.set_ylim(*zlim)
-        ax.set_aspect('equal')
-        ax.grid(True, color=_TD_COL_GRID, lw=0.6, alpha=0.7)
-        ax.set_xlabel('X, camera-space (m)', color=_TD_COL_INK, fontsize=8)
-        ax.set_ylabel('Z, depth (m)', color=_TD_COL_INK, fontsize=8)
-        ax.set_title('top-down — H36M (placed) vs mocap', color='#14181d', fontsize=9.5)
-        for spine in ax.spines.values():
-            spine.set_color(_TD_COL_GRID)
-        ax.tick_params(colors=_TD_COL_INK, labelsize=7)
-        handles = [
-            plt.Line2D([0], [0], color=_TD_COL_H36M, marker='o', lw=2, markersize=6, label='H36M (placed)'),
-            plt.Line2D([0], [0], color=_TD_COL_H36M_SMOOTH, marker='o', lw=2, markersize=6, label='H36M (smooth)'),
-            plt.Line2D([0], [0], color=_TD_COL_MOCAP, marker='o', lw=2, markersize=6, label='mocap'),
-        ]
-        ax.legend(handles=handles, loc='upper right', frameon=False, fontsize=7, labelcolor=_TD_COL_INK)
-
-        fig.canvas.draw()      # transform is only valid AFTER the draw (set_aspect moves the axes box)
-        img = np.asarray(fig.canvas.buffer_rgba())[:, :, :3][:, :, ::-1].copy()
-        self.base = cv2.resize(img, (width, height)) if img.shape[:2] != (height, width) else img
-        self.tf = ax.transData
-        self.fig_h = img.shape[0]
-        plt.close(fig)
-
-        self.col_raw = _hex_to_bgr(_TD_COL_H36M, fade_towards_white=0.8)     # emulates alpha=0.2
-        self.col_smooth = _hex_to_bgr(_TD_COL_H36M_SMOOTH)
-        self.col_mocap = _hex_to_bgr(_TD_COL_MOCAP)
-
-    def _px(self, xz):
-        X, Y = self.tf.transform(xz)
-        return int(round(X)), int(round(self.fig_h - Y))     # display origin is bottom-left
-
-    def _skeleton(self, img, xz, valid, bgr):
-        finite = valid & np.isfinite(xz).all(axis=-1)
-        for a, b in H36M_LIMBS:
-            if finite[a] and finite[b]:
-                cv2.line(img, self._px(xz[a]), self._px(xz[b]), bgr, 2, cv2.LINE_AA)
-        for j in np.where(finite)[0]:
-            cv2.circle(img, self._px(xz[j]), 3, bgr, -1, cv2.LINE_AA)
-
-    def render(self, h36m_valid, h36m_xz, h36m_xz_smooth, mocap_valid, mocap_xz):
-        img = self.base.copy()
-        self._skeleton(img, mocap_xz, mocap_valid, self.col_mocap)
-        self._skeleton(img, h36m_xz, h36m_valid, self.col_raw)
-        self._skeleton(img, h36m_xz_smooth, h36m_valid, self.col_smooth)
-        return img
+    fps = max(r['fps'] for r in dets.values())
+    tmp = os.path.join(tempfile.gettempdir(), f'{action}_{cam}_pnp_depth_vs_mocap.mp4')
+    writer = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*'mp4v'), fps, (W + 6 + _TD_PANEL_W, H))
+    sep = np.zeros((H, 6, 3), dtype=np.uint8)
+    fs = max(0.5, W / 1920)
+    want, fi, n_written = set(int(n) for n in native), 0, 0
+    last = int(native[-1])
+    # decode only the frames needed, and write each one immediately (a buffered 1080p clip is GBs)
+    while fi <= last:
+        if fi not in want:
+            if not cap.grab():
+                break
+            fi += 1
+            continue
+        ok, canvas = cap.read()
+        if not ok:
+            break
+        skels = []
+        if fi < len(mocap_cam):
+            skels.append((mocap_cam[fi][:, [0, 2]], mocap_joint_ok & np.isfinite(mocap_cam[fi]).all(-1), hex_bgr(_MOCAP_HEX), 5))   # thick: the target sits on it
+        if tri_cam is not None and fi < len(tri_cam):
+            skels.append((tri_cam[fi][:, [0, 2]], tri_joint_ok & np.isfinite(tri_cam[fi]).all(-1), hex_bgr(_TRI_HEX), 2))
+        lost = []
+        for d, r in dets.items():
+            i = row[d].get(fi)
+            P = r['smooth'][i] if i is not None else None
+            if P is not None and np.isfinite(P).all() and (P[:, 2] > _MIN_DEPTH_M).all():
+                draw_skeleton(canvas, reproject(P, K, dist_cv), hex_bgr(DET_HEX[d]))
+                skels.append((P[:, [0, 2]], np.ones(17, bool), hex_bgr(DET_HEX[d]), 2))
+            else:
+                lost.append(DET_LABEL[d])
+        for k, d in enumerate(dets):
+            cv2.putText(canvas, f'H36M from {DET_LABEL[d]} (smoothed)', (20, int(40 * fs * (k + 1))),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0 * fs, hex_bgr(DET_HEX[d]), 2, cv2.LINE_AA)
+        if lost:
+            cv2.putText(canvas, 'no skeleton this frame: ' + ', '.join(lost), (20, H - int(55 * fs)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8 * fs, (0, 0, 255), 2, cv2.LINE_AA)
+        cv2.putText(canvas, f'cam {cam}  native frame {fi}  t={n_written / fps:.2f}s', (20, H - int(20 * fs)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8 * fs, (255, 255, 255), 2, cv2.LINE_AA)
+        writer.write(np.concatenate([canvas, sep, panel.render(skels)], axis=1))
+        n_written += 1
+        fi += 1
+    cap.release()
+    writer.release()
+    out_path = _video_out(user, action, cam)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    shutil.copy2(tmp, out_path)               # cv2 writing through the Drive mount is slow and can truncate
+    os.remove(tmp)
+    return (f'{n_written} frames, ' + ', '.join(f'{DET_LABEL[d]} {err[d]:.0f} mm' for d in dets)
+            + ('' if tri_cam is not None else ', no triangulated target') + f' -> {out_path}')
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--cameras', default='00,01,02,03,04,05,06,07,08')
-    ap.add_argument('--user', default='User03')
-    ap.add_argument('--action', default='P03_CMJM_01')
+    ap = argparse.ArgumentParser(description='Video + top-down comparison of both detectors against the ground truths. '
+                                             'With no --user/--action, every camera with a PnP result and a local video; '
+                                             'cameras already rendered are skipped.')
+    ap.add_argument('--user', default=None, help='default: every user')
+    ap.add_argument('--action', default=None, help='default: every action (of --user, or of every user)')
+    ap.add_argument('--cameras', default=None, help='comma-separated subset; default every camera with a PnP result')
+    ap.add_argument('--videos', default=None, help="dir holding {cam}.mp4 if not {TRIAL_DIR}/{user}/{action} (one trial only)")
+    ap.add_argument('--tri', choices=['all', 'loo'], default='all',
+                    help="triangulated skeleton drawn: all-camera (default) or this camera's leave-one-out target")
+    ap.add_argument('--force', action='store_true', help='redo cameras already rendered')
+    ap.add_argument('--dry-run', action='store_true', help='list what would be rendered')
     args = ap.parse_args()
-    cameras = args.cameras.split(',')
 
-    trial_root = os.path.join(_TRIAL_DIR, args.user, args.action)
-    pnp_dir = os.path.join(trial_root, 'Analysis', 'keypoints', 'PnP')
-    yolo_2d_dir = os.path.join(trial_root, 'Analysis', 'keypoints')
-    out_dir = os.path.join(trial_root, 'Analysis', 'diagnostics')
-    os.makedirs(out_dir, exist_ok=True)
-
-    mocap_path = _mocap_path(args.user, args.action)
-    if not os.path.exists(mocap_path):
-        print(f"no {mocap_path} -- run step_0_load_mocap.py first")
+    require_out_dir()
+    want = set(args.cameras.split(',')) if args.cameras else None
+    jobs = sorted({j for d in DETECTORS for j in find_cameras(_pnp_path, d, args.user, args.action, want)})
+    if not jobs:
+        raise SystemExit(f'no {{cam}}_pnp.npz from either detector under {_OUT_DIR} for user={args.user or "*"} '
+                         f'action={args.action or "*"} -- run step_4_PnP.py first')
+    video_of = lambda u, a, c: os.path.join(args.videos or os.path.join(_TRIAL_DIR, u, a), f'{c}.mp4')
+    have_video = [j for j in jobs if os.path.exists(video_of(*j))]
+    todo = [j for j in have_video if args.force or not os.path.exists(_video_out(*j))]
+    print(f'{len(jobs)} camera(s) with PnP results under {_OUT_DIR}: {len(todo)} to render, '
+          f'{len(have_video) - len(todo)} already done, {len(jobs) - len(have_video)} with no local video')
+    if args.dry_run:
+        for user, action in sorted({(u, a) for u, a, _ in todo}):
+            print(f'  {user}/{action}: {",".join(c for u, a, c in todo if (u, a) == (user, action))}')
         return
-    mocap_data = np.load(mocap_path)
-    mocap_world_mm = mocap_data['kps3d']                 # (T,17,3) mm, world-space, NaN where invalid
-    mocap_valid_joint_mask = mocap_data['valid_joint_mask']   # (17,) -- False for Nose/Head
-    mocap_source_frame_idx = mocap_data['source_frame_idx']
-    assert np.array_equal(mocap_source_frame_idx, np.arange(len(mocap_source_frame_idx))), \
-        "mocap_h36m.npz looks decimated, not native-resolution -- re-run step_0_load_mocap.py"
-
-    for camera in cameras:
-        print(f"=== camera {camera} ===")
-
-        pnp_path = os.path.join(pnp_dir, f'{camera}_pnp.npz')
-        if not os.path.exists(pnp_path):
-            print(f"  no {pnp_path} -- run step_3_PnP.py --cameras {camera} first, skipping")
-            continue
-        pnp_data = np.load(pnp_path)
-        kps_H36M_placed = pnp_data['kps_H36M_placed']      # (T,17,3) metres, real camera-space
-        kps_SMPL24_placed = pnp_data['kps_SMPL24_placed']  # (T,24,3)
-        kps_H36M_smooth = pnp_data['kps_H36M_smooth']      # (T,17,3) metres, real camera-space
-        kps_SMPL24_smooth = pnp_data['kps_SMPL24_smooth'] 
-        K = pnp_data['cam_K']
-        dist_cv = pnp_data['cam_dist_cv']
-        L_ext = pnp_data['cam_L_ext']
-
-        yolo_2d_path = os.path.join(yolo_2d_dir, f'{camera}_2d.npz')
-        if not os.path.exists(yolo_2d_path):
-            print(f"  no {yolo_2d_path} -- run step_1_extract_2d.py --cameras {camera} first, skipping")
-            continue
-        yolo_data = np.load(yolo_2d_path)
-        h36m_2d = yolo_data['h36m_2d']                 # (T,17,3) x_px, y_px, conf
-        source_frame_idx = yolo_data['source_frame_idx']
-        fps = float(yolo_data['fps'])
-
-        n_frames = kps_H36M_placed.shape[0]
-        assert h36m_2d.shape[0] == n_frames, "PnP/2d frame count mismatch"
-
-
-        # mocap world-space (mm) -> this camera's real camera-space (m)
-        R_ext, t_ext = L_ext[:3, :3], L_ext[:3, 3]
-        mocap_cam_mm = np.einsum('ij,tkj->tki', R_ext, mocap_world_mm) + t_ext
-        mocap_cam_m = mocap_cam_mm / 1000.0
-        
-        video_path = os.path.join(trial_root, f'{camera}.mp4')
-        if not os.path.exists(video_path):
-            print(f"  no {video_path}, skipping")
-            continue
-
-        cap = cv2.VideoCapture(video_path)
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-        # top-down data + fixed axis limits, computed once over the whole clip
-        h36m_xz_all = kps_H36M_placed[:, :, [0, 2]]
-        h36m_xz_all_smooth = kps_H36M_smooth[:, :, [0, 2]]
-        mocap_xz_all = mocap_cam_m[:, :, [0, 2]]
-        xlim, zlim = compute_topdown_limits(h36m_xz_all, mocap_xz_all)
-        half_fov_x_rad = float(np.arctan(w / (2 * K[0, 0])))
-
-        panel = TopDownPanel(_TD_PANEL_W, h, half_fov_x_rad, xlim, zlim)
-
-        out_path = os.path.join(out_dir, f'{camera}_pnp_depth_vs_mocap_SCALED_640.mp4')
-        writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*'mp4v'), fps,
-                                  (w + 6 + _TD_PANEL_W, h))
-        sep = np.zeros((h, 6, 3), dtype=np.uint8)
-
-        # Decode only the frames we actually need (same grab/read pattern as
-        # step_1_extract_2d.py) and process/write each one immediately in the
-        # same pass, rather than buffering the whole decoded clip in memory
-        # first -- with source_frame_idx currently close to dense (see
-        # step_0_load_mocap.py's decimation), buffering the full clip is
-        # multiple GB and OOMs on the Jetson's 7.4GB RAM (no swap headroom).
-        n_ok = 0
-        tt = 0
-        frame_i = 0
-        max_idx = int(source_frame_idx[-1]) if len(source_frame_idx) else -1
-        while frame_i <= max_idx and tt < n_frames:
-            src_idx = int(source_frame_idx[tt])
-            if frame_i != src_idx:
-                ret = cap.grab()
-                if not ret:
-                    break
-                frame_i += 1
-                continue
-
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            # --- panel 1: front/video overlay, same as step_4_render_overlay.py ---
-            canvas = frame
-
-            yolo_pts = h36m_2d[tt, :, :2]
-            yolo_valid = h36m_2d[tt, :, 2] > _PNP_CONF_THRESH
-            yolo_bones = [(a, b) for a, b in H36M_LIMBS if yolo_valid[a] and yolo_valid[b]]
-            draw_points_and_bones(canvas, yolo_pts[yolo_valid], [], _COL_YOLO)
-            for a, b in yolo_bones:
-                cv2.line(canvas, tuple(yolo_pts[a].astype(int)), tuple(yolo_pts[b].astype(int)),
-                         _COL_YOLO, 2, cv2.LINE_AA)
-
-            has_h36m = (not np.isnan(kps_H36M_placed[tt]).any()
-                        and (kps_H36M_placed[tt][:, 2] > _MIN_DEPTH_M).all())
-            has_smpl24 = (not np.isnan(kps_SMPL24_placed[tt]).any()
-                          and (kps_SMPL24_placed[tt][:, 2] > _MIN_DEPTH_M).all())
-
-            if has_h36m:
-                h36m_2d_pts = reproject(kps_H36M_placed[tt], K, dist_cv)
-                draw_points_and_bones(canvas, h36m_2d_pts, H36M_LIMBS, _COL_H36M)
-            # if has_smpl24:
-            #     smpl24_2d_pts = reproject(kps_SMPL24_placed[tt], K, dist_cv)
-            #     draw_points_and_bones(canvas, smpl24_2d_pts, SMPL24_BONES, _COL_SMPL24)
-
-            if has_h36m or has_smpl24:
-                n_ok += 1
-            else:
-                cv2.putText(canvas, "PnP failed this frame", (20, h - 20),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2, cv2.LINE_AA)
-
-            cv2.putText(canvas, "YOLO", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, _COL_YOLO, 2, cv2.LINE_AA)
-            cv2.putText(canvas, "H36M", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, _COL_H36M, 2, cv2.LINE_AA)
-            #cv2.putText(canvas, "SMPL-24 (placed)", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, _COL_SMPL24, 2, cv2.LINE_AA)
-            cv2.putText(canvas, f"frame {tt}", (20, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                        (255, 255, 255), 1, cv2.LINE_AA)
-
-            # --- panel 2: top-down H36M (placed) vs mocap, this frame only ---
-            h36m_valid_tt = ~np.isnan(kps_H36M_placed[tt]).any(axis=-1)
-            if src_idx < mocap_cam_m.shape[0]:
-                mocap_valid_tt = mocap_valid_joint_mask & ~np.isnan(mocap_cam_m[src_idx]).any(axis=-1)
-                mocap_xz_tt = mocap_xz_all[src_idx]
-            else:
-                # mocap's native clip ran out before this camera frame --
-                # draw nothing for mocap this frame, don't invent data.
-                mocap_valid_tt = np.zeros(17, dtype=bool)
-                mocap_xz_tt = np.zeros((17, 2), dtype=np.float32)
-
-            topdown_img = panel.render(h36m_valid_tt, h36m_xz_all[tt], h36m_xz_all_smooth[tt],
-                                        mocap_valid_tt, mocap_xz_tt)
-
-            combined = np.concatenate([canvas, sep, topdown_img], axis=1)
-            writer.write(combined)
-            if tt % 100 == 0:
-                print(f"  {tt}/{n_frames}")
-
-            tt += 1
-            frame_i += 1
-
-        cap.release()
-        writer.release()
-        print(f"  {n_ok}/{n_frames} frames with a placed overlay")
-        print(f"  -> {out_path}")
+    n_done, failed = 0, []
+    for i, (user, action, cam) in enumerate(todo, 1):
+        try:
+            print(f'[{i}/{len(todo)}] {user}/{action} {cam}: {render(user, action, cam, video_of(user, action, cam), args)}', flush=True)
+            n_done += 1
+        except Exception as e:                      # one bad camera must not stop the batch
+            failed.append((user, action, cam))
+            print(f'[{i}/{len(todo)}] {user}/{action} {cam}: FAILED -- {type(e).__name__}: {e}', flush=True)
+    print(f'\nrendered {n_done}, failed {len(failed)}')
 
 
 if __name__ == '__main__':

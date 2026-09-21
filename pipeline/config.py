@@ -100,6 +100,12 @@ def spider_path(user, action, detector, gt='mocap'):
                         f'spider_error_{action}{"" if gt == "mocap" else "_tri"}.png')
 
 
+def depth_video_path(user, action, cam):
+    """step_5: the video with both detectors' smoothed skeletons + the top-down comparison against
+    mocap and the triangulated target."""
+    return os.path.join(analysis_dir(user, action), 'diagnostics', f'{cam}_pnp_depth_vs_mocap.mp4')
+
+
 def openpose_check_path(user, action, cam):
     """tools/render_openpose_check.py: the video with OpenPose's people, confidences and the projected mocap."""
     return os.path.join(analysis_dir(user, action), 'diagnostics', 'openpose', f'{cam}_openpose_check.mp4')
