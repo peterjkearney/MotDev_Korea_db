@@ -188,6 +188,11 @@ def require_motionbert():
             os.path.join(MB_DIR, 'data', 'mesh')]
     missing = [p for p in need if not os.path.exists(p)]
     if missing:
+        env = os.environ.get('MB_DIR')
+        why = ('MB_DIR is not set in this session (a %env setting is lost when the runtime restarts), so the '
+               'default location next to the repo was tried' if not env else
+               f'MB_DIR is set to {env!r}, which is not a folder, so the default location was tried instead'
+               if not os.path.isdir(env) else f'MB_DIR = {env!r}')
         raise SystemExit('MotionBERT not found at ' + MB_DIR + ' -- missing:\n  ' + '\n  '.join(missing)
-                         + '\nset the MB_DIR environment variable to the MotionBERT folder '
+                         + f'\n{why}.\nSet it to the MotionBERT folder '
                            '(Colab: %env MB_DIR=/content/drive/MyDrive/.../MotionBERT)')

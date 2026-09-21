@@ -63,6 +63,11 @@ def main():
     if args.subjects:
         want = set(args.subjects.split(','))
         subs = [s for s in subs if s in want]
+    if not subs:
+        deeper = sorted(glob.glob(os.path.join(args.gt3d, '*', 'B*', 'session_summary.json')))
+        hint = (f' -- they are one level down: try --gt3d {os.path.dirname(os.path.dirname(deeper[0]))}'
+                if deeper else '')
+        raise SystemExit(f'no subject folders (B010, B011, ...) directly under {args.gt3d}{hint}')
 
     n_reps = n_sub = n_skip = 0
     for sub in subs:
