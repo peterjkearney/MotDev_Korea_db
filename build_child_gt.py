@@ -80,7 +80,7 @@ CROWN_K = 0.9                      # crown above ear level, x ear-to-ear width
 
 GATES = dict(
     # session -- calibration data (enforced by camcal.select_spread)
-    calib_conf_thresh=0.5,         # a joint seen above this in >= 2 views is a correspondence
+    calib_conf_thresh=0.4,         # a joint seen above this in >= 2 views is a correspondence
     calib_min_corr_per_frame=4,    # frames with fewer carry almost nothing
     min_calib_frames_strict=80,    # strict tier: complete skeletons in all 3 views
     min_calib_frames=40,           # fallback tier

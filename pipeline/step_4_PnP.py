@@ -2,10 +2,17 @@
 """step_4_PnP.py -- place the skeleton in the camera by PnP, one frame at a time.
 
 Per frame, PnP aligns step_3's H36M-17 joints with the detector's 2D H36M
-joints (identical anatomical points; joints with 2D confidence > 0.4, at
-least 6 of them).  The rotation/translation found is applied to the SMPL-24
-joints too, which are what drives the avatar.  The root is then smoothed
-along time (RTS) to take out per-frame depth jitter.
+joints (joints with 2D confidence > 0.4, at least 6 of them).  The
+rotation/translation found is applied to the SMPL-24 joints too, which are
+what drives the avatar.  The root is then smoothed along time (RTS) to take
+out per-frame depth jitter.
+
+PnP assumes each 2D/3D pair is the same body point.  That holds for the limb
+joints, but not for the hips: the 3D hips are H36M joint centres regressed
+from the SMPL mesh (wide, at femoral-head height) while the detector's hips
+are COCO/OpenPose surface points (narrower, lower).  --exclude-joints leaves
+named joints out of the correspondence set, e.g. --exclude-joints Hip,RHip,LHip;
+the joints used are recorded in the output (pnp_joints_used).
 
     reads   {OUT_DIR}/{user}/{action}/Analysis/keypoints/{detector}/{cam}_2d.npz
             {OUT_DIR}/{user}/{action}/Analysis/mesh/{detector}/{cam}_mesh_pose.npz
@@ -18,6 +25,7 @@ cv2 only, no GPU.
 
     python3 step_4_PnP.py                                  # everything, OpenPose
     python3 step_4_PnP.py --detector yolo --user User03
+    python3 step_4_PnP.py --exclude-joints Hip,RHip,LHip   # limb joints only
 """
 
 import argparse
@@ -29,15 +37,35 @@ import numpy as np
 from config import (DETECTORS, OUT_DIR as _OUT_DIR, twod_path as _twod_path, mesh_pose_path as _mesh_path,
                     pnp_path as _pnp_path, calib_path, find_cameras, require_out_dir)
 from utils.calibration import load_calib
+from utils.openpose import H36M_NAMES
 from utils.rts_smoother import rts_smooth_3d
 
 _PNP_CONF_THRESH = 0.4
 _PNP_MIN_POINTS = 6
 
 
-def solve_root_pose(kps3d_m, kps2d_px, conf, K, dist_cv):
-    
+def parse_joints(spec):
+    """'Hip,RHip,4' -> (17,) bool mask of the joints to USE (all True for an empty spec)."""
+    use = np.ones(17, bool)
+    for tok in (t.strip() for t in (spec or '').split(',') if t.strip()):
+        if tok.isdigit():
+            j = int(tok)
+        else:
+            names = {n.lower(): i for i, n in enumerate(H36M_NAMES)}
+            if tok.lower() not in names:
+                raise SystemExit(f'--exclude-joints: unknown joint {tok!r}; H36M names are {", ".join(H36M_NAMES)}')
+            j = names[tok.lower()]
+        if not 0 <= j < 17:
+            raise SystemExit(f'--exclude-joints: joint index {j} out of range 0-16')
+        use[j] = False
+    return use
+
+
+def solve_root_pose(kps3d_m, kps2d_px, conf, K, dist_cv, use_joint=None):
+    """One frame.  use_joint: (17,) bool, joints allowed as correspondences (default all)."""
     mask = conf > _PNP_CONF_THRESH
+    if use_joint is not None:
+        mask &= use_joint
     if mask.sum() < _PNP_MIN_POINTS:
         return None
     obj_pts = np.ascontiguousarray(kps3d_m[mask], dtype=np.float64)
@@ -67,6 +95,7 @@ def place(user, action, camera, args):
         print(f'  WARNING 2D has {all_kp_2d.shape[0]} rows, mesh pose {all_kp_H36M_raw.shape[0]}; using {n_frames}')
     w, h, K, L_ext, dist = load_calib(calib_path(user, camera))
     dist_cv = dist.reshape(1, 5)
+    use_joint = parse_joints(args.exclude_joints)
 
     n_pnp_ok = 0
     all_kp_H36M_placed = np.full((n_frames, 17, 3), np.nan, np.float32)
@@ -75,8 +104,8 @@ def place(user, action, camera, args):
     for tt in range(n_frames):
         kp_H36M_raw = all_kp_H36M_raw[tt]
         kp_SMPL24_raw = all_kp_SMPL24_raw[tt]
-        # PnP aligns the H36M markers with the 2D keypoints (identical anatomical markers)
-        solved = solve_root_pose(kp_H36M_raw, all_kp_2d[tt, :, :2], all_kp_2d[tt, :, 2], K, dist_cv)
+        # PnP aligns the H36M joints with the 2D keypoints (see the module docstring on the hips)
+        solved = solve_root_pose(kp_H36M_raw, all_kp_2d[tt, :, :2], all_kp_2d[tt, :, 2], K, dist_cv, use_joint)
         if solved is not None:
             R, t, _, _ = solved
             all_kp_H36M_placed[tt]   = (R @ kp_H36M_raw.T).T   + t
@@ -103,8 +132,11 @@ def place(user, action, camera, args):
              kps_H36M_smooth=all_kp_H36M_smooth,
              kps_SMPL24_smooth=all_kp_SMPL24_smooth,
              pnp_ok=pnp_ok_mask, detector=np.array(args.detector),
+             pnp_joints_used=use_joint, pnp_conf_thresh=_PNP_CONF_THRESH,
              cam_w=w, cam_h=h, cam_K=K, cam_L_ext=L_ext, cam_dist_cv=dist_cv)
-    return f'solvePnP ok on {n_pnp_ok}/{n_frames} frames' + ('' if n_pnp_ok else ' -- no smoothing')
+    left_out = [H36M_NAMES[j] for j in np.where(~use_joint)[0]]
+    return (f'solvePnP ok on {n_pnp_ok}/{n_frames} frames' + ('' if n_pnp_ok else ' -- no smoothing')
+            + (f' (without {", ".join(left_out)})' if left_out else ''))
 
 
 def main():
@@ -115,6 +147,9 @@ def main():
     ap.add_argument('--action', default=None, help='default: every action (of --user, or of every user)')
     ap.add_argument('--cameras', default=None, help='comma-separated subset; default every camera with a mesh pose')
     ap.add_argument('--process-accel-std', default=10.0, type=float)
+    ap.add_argument('--exclude-joints', default='',
+                    help='H36M joints left out of the PnP correspondences, by name or index, e.g. Hip,RHip,LHip '
+                         '(the detector\'s hips are not the points the mesh\'s H36M hips are); default none')
     ap.add_argument('--force', action='store_true', help='redo cameras whose output already exists')
     ap.add_argument('--dry-run', action='store_true', help='list what would be run')
     args = ap.parse_args()

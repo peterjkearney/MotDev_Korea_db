@@ -137,7 +137,7 @@ def render(user, action, cam, video, args):
         legend.append(('triangulated OpenPose' + (' (leave-one-out)' if args.tri == 'loo' else ' (all cameras)'), _TRI_HEX, 1.0))
     legend += [(f'H36M from {DET_LABEL[d]}, smoothed: MPJPE {err[d]:.0f} mm vs {ref_name}', DET_HEX[d], 1.0) for d in dets]
     panel = TopDown(_TD_PANEL_W, H, float(np.arctan(W / (2 * K[0, 0]))), xlim, zlim,
-                    f'top-down, camera {cam}\n{user} / {action}', legend)
+                    f'top-down, camera {cam}\n{user} / {action}' + (f'  [{args.label}]' if args.label else ''), legend)
 
     fps = max(r['fps'] for r in dets.values())
     tmp = os.path.join(tempfile.gettempdir(), f'{action}_{cam}_pnp_depth_vs_mocap.mp4')
@@ -196,7 +196,8 @@ def render(user, action, cam, video, args):
                 skels.append((P[:, [0, 2]], np.ones(17, bool), hex_bgr(DET_HEX[d]), 2))
             else:
                 lost.append(DET_LABEL[d])
-        labels = [(f'H36M from {DET_LABEL[d]} (smoothed)', hex_bgr(DET_HEX[d])) for d in dets]
+        labels = [(f'H36M from {DET_LABEL[d]} (smoothed)' + (f' -- {args.label}' if args.label else ''),
+                   hex_bgr(DET_HEX[d])) for d in dets]
         if draw_2d:
             labels.append(('2D keypoints from the detector', _COL_2D))
         if draw_target:
@@ -232,6 +233,7 @@ def main():
     ap.add_argument('--videos', default=None, help="dir holding {cam}.mp4 if not {TRIAL_DIR}/{user}/{action} (one trial only)")
     ap.add_argument('--tri', choices=['all', 'loo'], default='all',
                     help="triangulated skeleton drawn: all-camera (default) or this camera's leave-one-out target")
+    ap.add_argument('--label', default='', help='a note written into the video, e.g. what this PnP variant is')
     ap.add_argument('--draw-2d', action='store_true', help="also draw the detector's 2D keypoints (always on when there is no video)")
     ap.add_argument('--draw-target', action='store_true',
                     help='also draw the triangulated target projected into the camera (always on when there is no video)')
