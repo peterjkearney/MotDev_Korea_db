@@ -24,8 +24,17 @@ L_ext maps lab (mm) -> camera (mm) exactly as BioCV's calibs do, so step_8's
 camera azimuths and step_6's LAB_UP work as they do for adults.
 
 Targets are leave-one-out (kps3d_loo[c] triangulated from the other two
-cameras) and already carry the per-frame quality gates as NaN, so step_8's
-NaN check excludes bad frames without knowing about them.
+cameras) as well as the all-camera solution, with bad joints as NaN so step_8's
+per-joint NaN handling excludes them without knowing about them.
+
+Gating (--gate).  build_child_gt.py marks every triangulated joint valid
+(seen in >= 2 views, reprojection within threshold) and separately flags a
+FRAME unusable when any bone deviates > 15% from the session median.  That
+frame flag discards two thirds of the frames on a typical rep -- one jittery
+wrist on a 135 mm forearm throws away 16 good joints.  'joint' (the default)
+keeps every valid joint and applies the bone check per bone instead: a bone
+further than --bone-dev from the session median (the label-swap signature)
+invalidates its two joints only.  'frame' reproduces the old whole-frame gate.
 
 Units.  GT3D files are in metres scaled so the child's measured stature is
 the cohort median; mm here, matching mocap.  Stature is written in the same
@@ -47,6 +56,37 @@ from utils.openpose import H36M_NAMES, body25_to_h36m_2d
 
 EVAL_EXCLUDE = ('Nose', 'Head', 'Spine')   # synthesised joints; see step_1b_triangulate_2d.py
 
+# H36M bones against build_child_gt.py's session_bone_median keys (BODY_25 neck = H36M Thorax,
+# mid-hip = Hip, so the definitions agree)
+BONES = {'torso': [('Hip', 'Thorax')],
+         'clavicle': [('Thorax', 'RShoulder'), ('Thorax', 'LShoulder')],
+         'upperarm': [('RShoulder', 'RElbow'), ('LShoulder', 'LElbow')],
+         'forearm': [('RElbow', 'RWrist'), ('LElbow', 'LWrist')],
+         'hip_offset': [('Hip', 'RHip'), ('Hip', 'LHip')],
+         'thigh': [('RHip', 'RKnee'), ('LHip', 'LKnee')],
+         'shank': [('RKnee', 'RAnkle'), ('LKnee', 'LAnkle')]}
+J = {n: i for i, n in enumerate(H36M_NAMES)}
+
+
+def bone_gate(X, ok, sess_bones, thresh):
+    """Per-bone check.  X (T,17,3) in any rigid frame, metres; ok (T,17) valid joints; sess_bones
+    {bone: median length, metres} from the session summary.  Returns (ok with the two joints of every
+    deviating bone cleared, number of joints cleared)."""
+    ok = ok.copy()
+    drop = np.zeros_like(ok)
+    for name, pairs in BONES.items():
+        ref = sess_bones.get(name)
+        if not ref:
+            continue
+        for a, b in pairs:
+            ia, ib = J[a], J[b]
+            both = ok[:, ia] & ok[:, ib]
+            L = np.linalg.norm(X[:, ia] - X[:, ib], axis=-1)
+            bad = both & (np.abs(L / ref - 1) > thresh)
+            drop[bad, ia] = True
+            drop[bad, ib] = True
+    return ok & ~drop, int(drop.sum())
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -55,6 +95,10 @@ def main():
     ap.add_argument('--include-unusable', action='store_true',
                     help='also lay out reps flagged unusable (still marked in the target)')
     ap.add_argument('--force', action='store_true', help='redo reps already laid out')
+    ap.add_argument('--gate', choices=['joint', 'frame'], default='joint',
+                    help="'joint': every valid joint, bones checked per bone (default); 'frame': the old whole-frame gate")
+    ap.add_argument('--bone-dev', type=float, default=0.25,
+                    help='joint gate: a bone this far (fraction) from its session median loses both joints')
     args = ap.parse_args()
     require_out_dir()
 
@@ -137,11 +181,24 @@ def main():
                 return ((X_world - org) @ Rw.T) * 1000.0
 
             X3 = d['X_h36m_floor'].astype(float) * 1000.0
-            X3[~(d['valid_h36m'] & d['frame_usable'][:, None])] = np.nan
+            sess_bones = summ.get('session_bone_median', {})
+            if args.gate == 'joint':
+                ok_all, n_drop = bone_gate(d['X_h36m_floor'].astype(float), d['valid_h36m'], sess_bones, args.bone_dev)
+                gate_note = (f'joint gate: {int(ok_all.sum())} joints on {int(ok_all.any(1).sum())}/{T} frames '
+                             f'({n_drop} joints dropped by the {args.bone_dev:.0%} bone check; the frame gate would have kept '
+                             f'{int((d["valid_h36m"] & d["frame_usable"][:, None]).sum())} joints on {int(d["frame_usable"].sum())} frames)')
+            else:
+                ok_all = d['valid_h36m'] & d['frame_usable'][:, None]
+                gate_note = f'frame gate: {int(ok_all.sum())} joints on {int(d["frame_usable"].sum())}/{T} frames'
+            X3[~ok_all] = np.nan
             loo = np.full((len(cams), T, 17, 3), np.nan, np.float32)
             for c in range(len(cams)):
                 Xc = to_floor_mm(d['X_h36m_cam_loo'][c].astype(float), c)
-                Xc[~(d['valid_h36m_loo'][c] & d['frame_usable_loo'][c][:, None])] = np.nan
+                if args.gate == 'joint':
+                    ok_c, _ = bone_gate(d['X_h36m_cam_loo'][c].astype(float), d['valid_h36m_loo'][c], sess_bones, args.bone_dev)
+                else:
+                    ok_c = d['valid_h36m_loo'][c] & d['frame_usable_loo'][c][:, None]
+                Xc[~ok_c] = np.nan
                 loo[c] = Xc
                 # round trip: the calib written above must map it back to camera c
                 Lp = np.eye(4)
@@ -160,7 +217,9 @@ def main():
                      valid_joint_mask=np.array([n not in EVAL_EXCLUDE for n in H36M_NAMES]),
                      joint_names=np.array(H36M_NAMES),
                      frame=np.array('floor: z up, origin under camera 1; X_cam = R @ X + t per calib'),
-                     stature_mm=float(d['stature_m']) * 1000.0)
+                     stature_mm=float(d['stature_m']) * 1000.0,
+                     gate=np.array(f'{args.gate}' + (f' bone_dev={args.bone_dev}' if args.gate == 'joint' else '')))
+            print(f'  {stub}: {gate_note}')
             n_reps += 1
         print(f'{sub}: laid out {n_reps} reps so far -> {udir}')
     print(f'\n{n_sub} subjects, {n_reps} reps laid out under {_OUT_DIR}, {n_skip} already there')

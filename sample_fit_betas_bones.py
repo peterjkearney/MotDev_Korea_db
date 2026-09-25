@@ -69,17 +69,35 @@ SEGMENTS = [('Hip', 'RHip'), ('RHip', 'RKnee'), ('RKnee', 'RAnkle'),
 
 
 # ----------------------------------------------------------------------------- SMPL (linear part)
-def load_smpl(n_betas=10):
+KID_TEMPLATE = os.environ.get('SMPL_KID_TEMPLATE',
+                              os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models', 'smpl_kid_template.npy'))
+
+
+def kid_shapedir(v_t):
+    """AGORA's child blend shape, built as smplx does from kid_template_path: the (mean-centred) kid
+    template minus the adult template, (6890,3).  Shape weight 0 = adult SMPL, 1 = the kid template
+    (an infant-proportioned body ~0.54 m tall); a 4-year-old sits in between.  The 10 betas act on top."""
+    if not os.path.isfile(KID_TEMPLATE):
+        raise SystemExit(f'{KID_TEMPLATE} not found -- AGORA smpl_kid_template.npy (or set SMPL_KID_TEMPLATE)')
+    k = np.load(KID_TEMPLATE).astype(np.float64)
+    return (k - k.mean(0)) - v_t
+
+
+def load_smpl(n_betas=10, kid=False):
+    """Linear SMPL shape model.  With kid=True the shape vector has n_betas + 1 entries, the last one
+    the kid blend weight."""
     import warnings
     with open(os.path.join(MB_MESH, 'SMPL_NEUTRAL.pkl'), 'rb') as f, warnings.catch_warnings():
         warnings.simplefilter('ignore', DeprecationWarning)      # scipy.sparse.csc path inside the pkl
         m = pickle.load(f, encoding='latin1')
     v_t = np.asarray(m['v_template'], dtype=np.float64)                 # (6890,3)  metres
     S = np.asarray(m['shapedirs'], dtype=np.float64)[:, :, :n_betas]    # (6890,3,10)
+    if kid:
+        S = np.concatenate([S, kid_shapedir(v_t)[:, :, None]], axis=2)  # (6890,3,11)
     Jr = np.load(os.path.join(MB_MESH, 'J_regressor_h36m_correct.npy')).astype(np.float64)  # (17,6890)
     J0 = Jr @ v_t                                                        # (17,3)
-    A = np.einsum('jv,vck->jck', Jr, S)                                  # (17,3,10)
-    return dict(v_t=v_t, S=S, J0=J0, A=A)
+    A = np.einsum('jv,vck->jck', Jr, S)                                  # (17,3,10|11)
+    return dict(v_t=v_t, S=S, J0=J0, A=A, kid=kid)
 
 
 def rest_joints_mm(smpl, beta):
@@ -113,20 +131,30 @@ def data_seg_lengths(kps3d, segs):
 # ----------------------------------------------------------------------------- fit
 def fit_betas(smpl, target_mm, segs, lam=1.0, sigma_mm=10.0, stature_m=None, w_stature=1.0):
     """Damped least squares.  Residuals are (fitted - target)/sigma per segment, sqrt(lam)*beta
-    as a ridge prior, and optionally (mesh_height - stature)/sigma."""
+    as a ridge prior, and optionally (mesh_height - stature)/sigma.  With a kid model (load_smpl
+    kid=True) the last parameter is the kid weight: bounded to [0, 1], no ridge, started at 0.5."""
     ok = np.isfinite(target_mm)
     segs_ok = [s for s, k in zip(segs, ok) if k]
     tgt = target_mm[ok]
     n_b = smpl['A'].shape[-1]
+    kid = smpl.get('kid', False)
+    n_reg = n_b - 1 if kid else n_b
 
     def resid(beta):
         r = (seg_lengths_mm(smpl, beta, segs_ok) - tgt) / sigma_mm
-        parts = [r, np.sqrt(lam) * beta]
+        parts = [r, np.sqrt(lam) * beta[:n_reg]]
         if stature_m is not None:
             parts.append(np.array([w_stature * 1000.0 * (mesh_height_m(smpl, beta) - stature_m) / sigma_mm]))
         return np.concatenate(parts)
 
-    sol = least_squares(resid, np.zeros(n_b), method='lm')
+    if kid:
+        x0 = np.zeros(n_b)
+        x0[-1] = 0.5
+        lo, hi = np.full(n_b, -np.inf), np.full(n_b, np.inf)
+        lo[-1], hi[-1] = 0.0, 1.0
+        sol = least_squares(resid, x0, bounds=(lo, hi), method='trf')
+    else:
+        sol = least_squares(resid, np.zeros(n_b), method='lm')
     # conditioning: singular values of the segment Jacobian at the solution (per unit beta, in mm)
     Jac = sol.jac[:len(tgt)] * sigma_mm
     sv = np.linalg.svd(Jac, compute_uv=False)
@@ -218,6 +246,8 @@ def main():
     ap.add_argument('--lam', type=float, default=1.0, help='ridge weight toward beta=0 (default 1)')
     ap.add_argument('--sigma-mm', type=float, default=10.0, help='segment-length noise scale (default 10 mm)')
     ap.add_argument('--n-betas', type=int, default=10)
+    ap.add_argument('--kid', action='store_true',
+                    help="add AGORA's kid template as an extra shape direction (weight in [0,1], printed last)")
     ap.add_argument('--compare-betas', action='append', default=[],
                     help="MotionBERT {cam}_final_betas.npz to report alongside (repeatable)")
     ap.add_argument('--batch', default=None, help='OUT_DIR: fit every {user}/{action}/Analysis/H36M skeleton under it')
@@ -228,11 +258,16 @@ def main():
     if not args.skel and not args.batch:
         ap.error('give --skel <npz> (repeatable) or --batch <OUT_DIR>')
 
-    smpl = load_smpl(args.n_betas)
+    smpl = load_smpl(args.n_betas, kid=args.kid)
+    n_p = smpl['A'].shape[-1]
     if args.batch:
         run_batch(args, smpl)
         return
-    print(f'SMPL neutral mean shape: T-pose height {mesh_height_m(smpl, np.zeros(args.n_betas)):.3f} m')
+    print(f'SMPL neutral mean shape: T-pose height {mesh_height_m(smpl, np.zeros(n_p)):.3f} m')
+    if args.kid:
+        e = np.zeros(n_p)
+        e[-1] = 1.0
+        print(f'kid template (weight 1): T-pose height {mesh_height_m(smpl, e):.3f} m')
     if args.stature_m:
         print(f'subject stature: {args.stature_m:.3f} m')
 
@@ -246,11 +281,12 @@ def main():
         beta, sv = fit_betas(smpl, tgt, SEGMENTS, lam=args.lam, sigma_mm=args.sigma_mm,
                              stature_m=args.use_stature)
         fit = seg_lengths_mm(smpl, beta, SEGMENTS)
-        mean = seg_lengths_mm(smpl, np.zeros(args.n_betas), SEGMENTS)
+        mean = seg_lengths_mm(smpl, np.zeros(n_p), SEGMENTS)
 
         print(f'\n=== {path}')
         print(f'    {kps.shape[0]} frames, {np.isfinite(kps).all(-1).any(-1).sum()} with any joint')
-        print(f'    fitted betas : ' + ' '.join(f'{b:+.3f}' for b in beta))
+        print(f'    fitted betas : ' + ' '.join(f'{b:+.3f}' for b in beta[:args.n_betas])
+              + (f'   kid weight {beta[-1]:.3f}' if args.kid else ''))
         h = mesh_height_m(smpl, beta)
         line = f'    T-pose mesh height from fitted betas: {h:.3f} m'
         if args.stature_m:
@@ -267,6 +303,8 @@ def main():
 
     for path in args.compare_betas:
         b = np.load(path)['betas'].astype(np.float64)[:args.n_betas]
+        if args.kid:
+            b = np.r_[b, 0.0]                                    # MotionBERT's betas are adult: kid weight 0
         print(f'\n--- MotionBERT {path}')
         print(f'    betas        : ' + ' '.join(f'{x:+.3f}' for x in b))
         print(f'    T-pose mesh height: {mesh_height_m(smpl, b):.3f} m')

@@ -87,16 +87,19 @@ def is_gt3d(path):
         return 'h36m_2d' in d.files and 'K_1080' in d.files
 
 
-def self_calibrate(raw_rep, gt3d_out, fps):
-    """No calibrated twin: run build_child_gt.process_session on the rep's own folder, gates
-    relaxed so ~100 frames can calibrate.  Returns the rep file it wrote."""
+def self_calibrate(raw_rep, gt3d_out, fps, calib_data=None):
+    """No calibrated twin: run build_child_gt.process_session on the rep's own folder (or on
+    --calib-data, e.g. the drive's Aligned folder holding EVERY rep of the subject, which gives the
+    full session calibration even when build_child_gt flagged the session unusable and saved no
+    rep), gates relaxed so ~100 frames can calibrate.  Returns the rep file it wrote."""
     sys.path.insert(0, HERE)
     import build_child_gt as bcg
     stub = os.path.basename(raw_rep)[:-4]
     subject = stub.split('_')[0]
     bcg.GATES.update(min_calib_frames_strict=20, min_calib_frames=20, min_calib_corr=400,
                      min_upright_frames=5)
-    args = SimpleNamespace(out=gt3d_out, data=os.path.dirname(os.path.abspath(raw_rep)),
+    data = os.path.abspath(calib_data) if calib_data and os.path.isdir(calib_data) else os.path.dirname(os.path.abspath(raw_rep))
+    args = SimpleNamespace(out=gt3d_out, data=data,
                            json_dir=os.path.join(gt3d_out, '_no_json'), video_dir=os.path.join(gt3d_out, '_no_video'),
                            scale='stature', fps=fps, calib_stride=1, calib_max_frames=800, calib_corr=6000,
                            save_all=True)
@@ -114,10 +117,15 @@ def self_calibrate(raw_rep, gt3d_out, fps):
     rep = os.path.join(gt3d_out, subject, stub + '.npz')
     if not os.path.exists(rep):
         raise SystemExit(f'{rep} was not written')
+    # process_session saves every rep it calibrated from; keep only this one so step_1_korea_2d
+    # lays out a single trial (the session summary and stature stay)
+    for other in glob.glob(os.path.join(gt3d_out, subject, f'{subject}_*.npz')):
+        if os.path.abspath(other) != os.path.abspath(rep):
+            os.remove(other)
     return rep
 
 
-def stage_gt3d(rep, gt3d_root, gt3d_out, fps):
+def stage_gt3d(rep, gt3d_root, gt3d_out, fps, calib_data=None):
     """-> the calibrated rep file under gt3d_out/<subject>/, plus session_summary.json and user_meta.json."""
     stub = os.path.basename(rep)[:-4]
     subject = stub.split('_')[0]
@@ -133,8 +141,10 @@ def stage_gt3d(rep, gt3d_root, gt3d_out, fps):
             src, how = twin, f'session calibration from {twin}'
         else:
             print(f'no calibrated twin at {twin}')
-            src = self_calibrate(rep, gt3d_out, fps)
-            how = 'calibrated from the rep itself (relaxed gates -- weaker than a session calibration)'
+            src = self_calibrate(rep, gt3d_out, fps, calib_data)
+            how = ('calibrated from every rep of the subject under ' + calib_data + ' (relaxed gates)'
+                   if calib_data and os.path.isdir(calib_data) else
+                   'calibrated from the rep itself (relaxed gates -- weaker than a session calibration)')
     print(f'calibrated rep: {how}')
     if os.path.abspath(src) != os.path.abspath(dst):
         shutil.copy2(src, dst)
@@ -268,6 +278,9 @@ def main():
     ap.add_argument('--out', default=None, help='output root (default <rep folder>/out/<stub>)')
     ap.add_argument('--cameras', default=None, help='comma-separated subset (Korea 1,2,3; BioCV 00..08); default all')
     ap.add_argument('--fps', type=float, default=30.0, help='only used when calibrating from the rep itself')
+    ap.add_argument('--calib-data', default=None,
+                    help='Korea, no calibrated twin: folder with EVERY aligned rep of the subject to calibrate the session '
+                         'from (e.g. /Volumes/Expansion/MotorDevelopment/Korea/B/Aligned); default: the rep\'s own folder')
     ap.add_argument('--tri', choices=['all', 'loo'], default='all', help='which triangulated target step_5 draws / step_8 scores')
     ap.add_argument('--force', action='store_true', help='redo everything, including MotionBERT')
     args = ap.parse_args()
@@ -296,7 +309,7 @@ def main():
         run_step('step_1b_triangulate_2d.py', base, '--user', subject, '--action', stub, *cams, '--verbose')
     else:
         log('1. calibrated rep')
-        subject, stub = stage_gt3d(src, args.gt3d, os.path.join(out, 'GT3D'), args.fps)
+        subject, stub = stage_gt3d(src, args.gt3d, os.path.join(out, 'GT3D'), args.fps, args.calib_data)
         log('2. lay the rep out as a pipeline trial (step_1_korea_2d)')
         run_step('step_1_korea_2d.py', base, '--gt3d', os.path.join(out, 'GT3D'), '--subjects', subject, '--include-unusable')
 
