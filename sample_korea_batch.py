@@ -229,7 +229,7 @@ def main():
     with open(os.path.join(out_root, 'batch_summary.csv'), 'w', newline='') as f:
         w = csv.DictWriter(f, fieldnames=keys)
         w.writeheader()
-        w.writerows(rows)
+        w.writerows([{k: (round(v, 2) if isinstance(v, float) else v) for k, v in r.items()} for r in rows])
     print('\n' + text)
     print(f'\nwritten: {os.path.join(out_root, "batch_summary.txt")} and .csv')
 

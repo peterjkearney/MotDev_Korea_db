@@ -101,7 +101,8 @@ writes it and every step that reads it.
 {OUT_DIR}/{user}/{action}/Analysis/diagnostics/{detector}/error_metrics[_tri].npz, spider_error_*.png   step_8 (--gt)
 ```
 
-Steps 0 to 8 are moved, except the step_7 render.  From 2a on, `--detector
+Steps 0 to 8 are moved, except the step_7 render (2c and 4b, the shape fit and
+the configuration runner, were added on the new layout).  From 2a on, `--detector
 openpose|yolo` (default openpose) says whose 2D a step works from, and its
 outputs go to a matching subfolder.  Run with no `--user` / `--action` they
 do every trial, skip what is already done (`--force` to redo) and carry on
@@ -181,9 +182,51 @@ There is no local copy of anything for this dataset, so the layout step puts
 the calibs and `user_meta.json` in the output root too, where `config` looks
 second.  Everything skips what is already done.
 
-Only reps `build_child_gt.py` marked usable are laid out
-(`--include-unusable` to override).  Frames that failed its per-frame gates
-are NaN in the target, so `step_8` skips them without knowing why.
+Only reps `build_child_gt.py` marked usable, of subjects it marked usable, are
+laid out (`--include-unusable` to override).  The target is gated PER JOINT
+(`--gate joint`, the default): every cleanly triangulated joint is kept, and a
+bone further than 25% from the session median -- the label-swap signature --
+loses its two joints.  The builder's whole-frame gate (`--gate frame`) threw
+away two thirds of the frames on a typical rep.
+
+### Configurations: the child recipe and its ablations
+
+`step_4` is one recipe (MotionBERT's shape rescaled to the stature, rigid PnP
+per frame).  `configs.py` lists the alternatives that were worked out on the
+sample reps, as a CHAIN from the original pipeline to the child recipe (C0-C9,
+one change per step), a LEAVE-ONE-OUT set from the recipe (L1-L6) and
+references; `python3 configs.py` prints the legend.  The child recipe (C8) is:
+the AGORA kid-blend shape fitted to the subject's bone lengths, MotionBERT's
+rotations as the initialisation only, the global rotation frozen to the
+per-frame ray orientation plus one constant per trial, the translation and the
+23 joint angles refined against the 2D (spine/nose/head left out, whose H36M
+and OpenPose definitions differ), feet pinned while grounded, a floor hinge,
+and the grounded ankle held at its height above the calibrated floor.
+
+```
+python3 step_2c_fit_shape.py ; python3 step_2c_fit_shape.py --cohort    # shapes per subject, then the cohort median
+python3 step_4b_refine.py [--configs chain|loo|C8,C9] [--device cuda]   # every trial x configuration, skip-if-done
+python3 step_8_spider_error.py --gt triangulated --config all           # score each (PnP/{det}/{config}/ -> diagnostics/{det}/{config}/)
+python3 tools/results_table.py --gt triangulated                        # the long table: one row per trial x camera x config
+python3 tools/compare_configs.py [--baseline C8]                        # wide views per metric, subject medians, paired differences
+python3 tools/run_korea.py --gt3d .../Korea/B/GT3D                      # all of the above in order, resumable
+```
+
+Layout additions:
+
+```
+{OUT_DIR}/{user}/shapes.npz, {OUT_DIR}/cohort_shapes.npz                       step_2c
+{OUT_DIR}/{user}/{action}/Analysis/PnP/{detector}/{config}/{cam}_pnp.npz         step_4b (step_4's format + the config)
+{OUT_DIR}/{user}/{action}/Analysis/diagnostics/{detector}/{config}/error_metrics_tri.npz   step_8 --config
+{OUT_DIR}/results_table_tri.csv, configs_wide_*.csv, configs_by_subject.csv, configs_summary.txt
+```
+
+`utils/smpl_lite.py` holds the SMPL pieces the shape fit and the refinement
+need (linear shape model, kid blend, skinning at the regressor vertices);
+the kid template is `models/smpl_kid_template.npy` (AGORA; `MODELS_DIR` or
+`SMPL_KID_TEMPLATE`).  Aggregate camera -> trial -> subject -> cohort; the
+subject is the unit of evidence, and the paired differences per subject
+against the recipe are what decide a configuration.
 
 ## Scoring
 

@@ -202,7 +202,7 @@ def score_trial(user, action, cameras, args):
     n_frames = []
 
     for camera in cameras:
-        pnp_path = _pnp_path(user, action, args.detector, camera)
+        pnp_path = _pnp_path(user, action, args.detector, camera, args.config)
         yolo_2d_path = _twod_path(user, action, args.detector, camera)
         if not os.path.exists(pnp_path) or not os.path.exists(yolo_2d_path):
             print(f"=== camera {camera}: missing pnp/2d data, skipping ===")
@@ -348,12 +348,13 @@ def score_trial(user, action, cameras, args):
     ax.set_xticklabels([f'cam {c}\n{a:.0f}\N{DEGREE SIGN}' for c, a in zip(labels, angles)])
     ax.set_ylabel('mean 3D joint error (mm)', labelpad=30)
     ax.set_title(f'PnP vs {"mocap" if args.gt == "mocap" else "triangulated OpenPose (" + ("leave-one-out" if args.tri == "loo" else "all cameras") + ")"}: '
-                 f'mean 3D joint error by camera\n{user} / {action} ({args.detector})', pad=24)
+                 f'mean 3D joint error by camera\n{user} / {action} ({args.detector}'
+                 + (f', configuration {args.config}' if args.config else '') + ')', pad=24)
     ax.legend(loc='lower left', bbox_to_anchor=(-0.15, -0.15), fontsize=7)
 
     draw_floor_map(ax_map, traj_xy, heading_xy, frame_ok, cam_data_by_label, subject_lab_xy)
 
-    out_path = _spider_path(user, action, args.detector, args.gt)
+    out_path = _spider_path(user, action, args.detector, args.gt, args.config)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
@@ -361,7 +362,7 @@ def score_trial(user, action, cameras, args):
     # Machine-readable twin of the plot, for tools/run_batch.py to aggregate
     # across trials. Rows follow the same angle-sorted camera order as the
     # chart, so index i means the same camera in both.
-    metrics_path = _metrics_path(user, action, args.detector, args.gt)
+    metrics_path = _metrics_path(user, action, args.detector, args.gt, args.config)
     ex = [extras[i] for i in order]
     np.savez(metrics_path,
              gt=np.array(args.gt), tri=np.array(args.tri if args.gt == 'triangulated' else ''),
@@ -409,19 +410,39 @@ def main():
     ap.add_argument('--verbose', action='store_true', help='print every camera, not just the trial summary')
     ap.add_argument('--force', action='store_true', help='redo trials already scored against this --gt')
     ap.add_argument('--dry-run', action='store_true', help='list what would be scored')
+    ap.add_argument('--config', default=None,
+                    help="score step_4b's placement for this configuration id (configs.py) instead of step_4's; "
+                         "'all' scores every configuration that has a placement")
     args = ap.parse_args()
 
     require_out_dir()
+    if args.config == 'all':
+        import configs
+        for cid in configs.ORDER:
+            sub = argparse.Namespace(**vars(args))
+            sub.config = cid
+            print(f'\n=== configuration {cid}: {configs.CONFIGS[cid]["note"]}')
+            score_all(sub)
+    else:
+        score_all(args)
+
+
+def score_all(args):
     want = set(args.cameras.split(',')) if args.cameras else None
     by_trial = {}
-    for u, a, c in find_cameras(_pnp_path, args.detector, args.user, args.action, want):
+    for u, a, c in find_cameras(lambda uu, aa, dd, cc: _pnp_path(uu, aa, dd, cc, args.config),
+                                args.detector, args.user, args.action, want):
         by_trial.setdefault((u, a), []).append(c)
     if not by_trial:
-        raise SystemExit(f'no {args.detector} {{cam}}_pnp.npz under {_OUT_DIR} for user={args.user or "*"} '
-                         f'action={args.action or "*"} -- run step_4_PnP.py first')
-    todo = [t for t in sorted(by_trial) if args.force or not os.path.exists(_metrics_path(*t, args.detector, args.gt))]
-    print(f'{args.detector} vs {args.gt}: {len(by_trial)} trial(s) with PnP results under {_OUT_DIR}: '
-          f'{len(todo)} to score, {len(by_trial) - len(todo)} already done')
+        msg = (f'no {args.detector} {{cam}}_pnp.npz under {_OUT_DIR} for user={args.user or "*"} '
+               f'action={args.action or "*"}' + (f' configuration {args.config}' if args.config else ''))
+        if args.config:
+            print(msg + ' -- run step_4b_refine.py first')
+            return
+        raise SystemExit(msg + ' -- run step_4_PnP.py first')
+    todo = [t for t in sorted(by_trial) if args.force or not os.path.exists(_metrics_path(*t, args.detector, args.gt, args.config))]
+    print(f'{args.detector} vs {args.gt}' + (f' [{args.config}]' if args.config else '') + f': {len(by_trial)} trial(s) with '
+          f'PnP results under {_OUT_DIR}: {len(todo)} to score, {len(by_trial) - len(todo)} already done')
     if args.dry_run:
         for user, action in todo:
             print(f'  {user}/{action}: cameras {",".join(by_trial[(user, action)])}')

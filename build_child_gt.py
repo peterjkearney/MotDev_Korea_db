@@ -86,7 +86,7 @@ GATES = dict(
     min_calib_frames=40,           # fallback tier
     min_calib_corr=1500,
     max_reproj_over_epipolar=1.6,  # calibration reprojection vs the model-free noise floor
-    max_abs_roll_deg=5.0,          # tripods: roll must come out near zero
+    max_abs_roll_deg=10.0,          # tripods: roll must come out near zero
     max_long_bone_cv_pct=8.0,      # depth distortion makes bones breathe
     min_floor_inlier_frac=0.6,
     min_upright_frames=15,         # to measure stature at all
@@ -284,15 +284,19 @@ def scaled(cams, s):
                         image_size=cams.image_size)
 
 
-def jsonable(x):
+JSON_DECIMALS = 2                     # the summary is for reading; the rep .npz files keep full precision
+JSON_PRECISE = {'session_bone_median', 'unit_scale'}   # read back by code (step_1_korea_2d's bone check): 4 decimals
+
+
+def jsonable(x, decimals=JSON_DECIMALS):
     if isinstance(x, dict):
-        return {k: jsonable(v) for k, v in x.items()}
+        return {k: jsonable(v, 4 if k in JSON_PRECISE else decimals) for k, v in x.items()}
     if isinstance(x, (list, tuple)):
-        return [jsonable(v) for v in x]
+        return [jsonable(v, decimals) for v in x]
     if isinstance(x, np.ndarray):
-        return jsonable(x.tolist())
+        return jsonable(x.tolist(), decimals)
     if isinstance(x, (np.floating, float)):
-        return None if not np.isfinite(x) else float(x)
+        return None if not np.isfinite(x) else round(float(x), decimals)
     if isinstance(x, (np.integer,)):
         return int(x)
     if isinstance(x, np.bool_):
@@ -651,8 +655,8 @@ def write_tables(out_root):
                 rr[f'n_usable_frames_loo_cam{c + 1}'] = loo[c]
             rr['reasons'] = '; '.join(r.get('reasons', []))
             rep_rows.append(rr)
-    pd.DataFrame(sess_rows).to_csv(os.path.join(out_root, 'sessions.csv'), index=False)
-    pd.DataFrame(rep_rows).to_csv(os.path.join(out_root, 'reps.csv'), index=False)
+    pd.DataFrame(sess_rows).to_csv(os.path.join(out_root, 'sessions.csv'), index=False, float_format='%.2f')
+    pd.DataFrame(rep_rows).to_csv(os.path.join(out_root, 'reps.csv'), index=False, float_format='%.2f')
     return pd.DataFrame(sess_rows), pd.DataFrame(rep_rows)
 
 

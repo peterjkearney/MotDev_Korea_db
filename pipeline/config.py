@@ -78,9 +78,20 @@ def mesh_pose_path(user, action, detector, cam):
     return os.path.join(analysis_dir(user, action), 'mesh', detector, f'{cam}_mesh_pose.npz')
 
 
-def pnp_path(user, action, detector, cam):
-    """step_4: the skeleton placed in this camera's frame by PnP (per frame) + the smoothed copy."""
-    return os.path.join(analysis_dir(user, action), 'PnP', detector, f'{cam}_pnp.npz')
+def pnp_path(user, action, detector, cam, config=None):
+    """step_4: the skeleton placed in this camera's frame by PnP (per frame) + the smoothed copy.
+    With a configuration id (configs.py), step_4b's placement for it, one folder down."""
+    return os.path.join(analysis_dir(user, action), 'PnP', detector, *([config] if config else []), f'{cam}_pnp.npz')
+
+
+def shapes_path(user):
+    """step_2c: the body shapes fitted to this subject's bone lengths (adult SMPL and kid blend)."""
+    return os.path.join(OUT_DIR, user, 'shapes.npz')
+
+
+def cohort_shapes_path():
+    """step_2c --cohort: the cohort-median kid shape, one for every subject."""
+    return os.path.join(OUT_DIR, 'cohort_shapes.npz')
 
 
 def features_path(user, action, detector, cam):
@@ -88,15 +99,16 @@ def features_path(user, action, detector, cam):
     return os.path.join(analysis_dir(user, action), 'features', detector, f'{cam}_features.npz')
 
 
-def metrics_path(user, action, detector, gt='mocap'):
-    """step_8: per-camera error metrics against mocap ('mocap') or the triangulated target ('triangulated')."""
-    return os.path.join(analysis_dir(user, action), 'diagnostics', detector,
+def metrics_path(user, action, detector, gt='mocap', config=None):
+    """step_8: per-camera error metrics against mocap ('mocap') or the triangulated target ('triangulated');
+    with a configuration id, the score of step_4b's placement for it, one folder down."""
+    return os.path.join(analysis_dir(user, action), 'diagnostics', detector, *([config] if config else []),
                         'error_metrics.npz' if gt == 'mocap' else 'error_metrics_tri.npz')
 
 
-def spider_path(user, action, detector, gt='mocap'):
+def spider_path(user, action, detector, gt='mocap', config=None):
     """step_8: the error-by-camera chart that goes with metrics_path."""
-    return os.path.join(analysis_dir(user, action), 'diagnostics', detector,
+    return os.path.join(analysis_dir(user, action), 'diagnostics', detector, *([config] if config else []),
                         f'spider_error_{action}{"" if gt == "mocap" else "_tri"}.png')
 
 
@@ -139,9 +151,10 @@ def find_cameras(path_fn, detector, user=None, action=None, cameras=None):
         cam = os.path.basename(p)[:-len(suffix)]
         if '_' in cam:        # '*_betas.npz' also matches '00_final_betas.npz'; camera names have no '_'
             continue
-        a = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(p))))   # .../{user}/{action}
+        # {OUT_DIR}/{user}/{action}/Analysis/...: the first two components, whatever the depth below
+        u, a = os.path.relpath(p, OUT_DIR).split(os.sep)[:2]
         if cameras is None or cam in cameras:
-            out.append((os.path.basename(os.path.dirname(a)), os.path.basename(a), cam))
+            out.append((u, a, cam))
     return out
 
 
