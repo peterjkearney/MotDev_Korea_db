@@ -7,8 +7,10 @@ flags, in one place, resumable after a Colab disconnect by running it again:
     1. step_1_korea_2d      lay out the usable reps of the usable subjects (per-joint gated target)
     2. step_2a, 2b, 3, 4    MotionBERT (GPU), per-camera betas, skeleton, PnP
     3. step_2c              adult and kid shapes per subject, then the cohort-median kid shape
-    4. step_4b              every configuration (configs.py), GPU when there is one
-    5. step_8               score step_4's placement and every configuration
+    4. step_4b              every configuration (configs.py), GPU when there is one -- subject by subject,
+                            each subject scored (step_8) and the tables refreshed as soon as it is done, so
+                            {OUT_DIR}/results_table_tri.csv and configs_summary.txt grow while the run goes
+    5. step_8               a final scoring pass (anything the per-subject loop missed)
     6. tools/results_table  the long table;  tools/compare_configs  the wide views and paired differences
 
     %env BIOCV_OUT=/content/drive/MyDrive/MotorDevelopment/Data/Korea
@@ -67,7 +69,19 @@ def main():
         elif st == 'step_2c':
             ok = run('step_2c_fit_shape.py', *users) and run('step_2c_fit_shape.py', '--cohort')
         elif st == 'step_4b':
-            ok = run('step_4b_refine.py', *users, '--configs', args.configs, '--device', args.device)
+            # subject by subject, scoring and refreshing the tables after each, so progress can be
+            # read off {OUT_DIR}/results_table_tri.csv and configs_summary.txt while the run is going
+            subjects = ([args.users] if users else sorted(
+                d for d in os.listdir(OUT_DIR) if os.path.isdir(os.path.join(OUT_DIR, d)) and d.startswith('B')))
+            for i, u in enumerate(subjects, 1):
+                print(f'\n##### subject {u} ({i}/{len(subjects)})', flush=True)
+                ok = run('step_4b_refine.py', '--user', u, '--configs', args.configs, '--device', args.device)
+                ok = run('step_8_spider_error.py', '--user', u, '--gt', 'triangulated') and ok
+                ok = run('step_8_spider_error.py', '--user', u, '--gt', 'triangulated', '--config', 'all') and ok
+                run('tools/results_table.py', '--gt', 'triangulated')
+                run('tools/compare_configs.py')
+                if not ok and args.stop_on_fail:
+                    break
         elif st == 'step_8':
             ok = run('step_8_spider_error.py', *users, '--gt', 'triangulated') \
                 and run('step_8_spider_error.py', *users, '--gt', 'triangulated', '--config', 'all')
