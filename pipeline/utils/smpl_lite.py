@@ -11,9 +11,10 @@ Two views of the same model:
 
 Shape vectors are 10 betas, or 11 with AGORA's kid template as the last direction: weight 0 is
 the adult template, 1 the infant-proportioned kid template (SMIL-like, ~0.54 m), and the 10
-betas act on top.  The template file is MODELS_DIR/smpl_kid_template.npy (config.MODELS_DIR,
-or SMPL_KID_TEMPLATE).  Built as smplx builds it: the mean-centred kid template minus the
-adult template.
+betas act on top.  The template file (AGORA's smpl_kid_template.npy, a licensed asset kept out
+of git) is found at SMPL_KID_TEMPLATE, the repo's models/ folder, or next to SMPL_NEUTRAL.pkl
+in MotionBERT's mesh folder.  Built as smplx builds it: the mean-centred kid template minus
+the adult template.
 
 The H36M regressor is the one MotionBERT's mesh checkpoint carries (utils_smpl.SMPL registers
 it as a buffer, so the checkpoint's copy overrides data/mesh/J_regressor_h36m_correct.npy,
@@ -30,7 +31,24 @@ from config import MB_DIR, MODELS_DIR
 
 MB_MESH = os.path.join(MB_DIR, 'data', 'mesh')
 MB_CKPT = os.path.join(MB_DIR, 'checkpoint', 'mesh', 'FT_MB_release_MB_ft_pw3d', 'best_epoch.bin')
-KID_TEMPLATE = os.environ.get('SMPL_KID_TEMPLATE', os.path.join(MODELS_DIR, 'smpl_kid_template.npy'))
+# AGORA's kid template is a licensed model asset, kept out of git (*.npy is ignored) like the SMPL pickle and
+# the MotionBERT weights.  Looked for at SMPL_KID_TEMPLATE, then MODELS_DIR (the repo's models/ folder, local),
+# then next to SMPL_NEUTRAL.pkl in MotionBERT's mesh folder (on Drive for Colab: copy it there once).
+KID_TEMPLATE_CANDIDATES = [os.environ.get('SMPL_KID_TEMPLATE'),
+                           os.path.join(MODELS_DIR, 'smpl_kid_template.npy'),
+                           os.path.join(MB_MESH, 'smpl_kid_template.npy')]
+
+
+def kid_template_path():
+    for c in KID_TEMPLATE_CANDIDATES:
+        if c and os.path.isfile(c):
+            return c
+    raise SystemExit('smpl_kid_template.npy (AGORA kid template) not found -- looked at:\n  '
+                     + '\n  '.join(c for c in KID_TEMPLATE_CANDIDATES if c)
+                     + f'\nCopy it next to SMPL_NEUTRAL.pkl ({MB_MESH}) or set SMPL_KID_TEMPLATE to its path.')
+
+
+KID_TEMPLATE = next((c for c in KID_TEMPLATE_CANDIDATES if c and os.path.isfile(c)), KID_TEMPLATE_CANDIDATES[1])
 
 H36M = ['Hip', 'RHip', 'RKnee', 'RAnkle', 'LHip', 'LKnee', 'LAnkle', 'Spine', 'Thorax', 'Nose', 'Head',
         'LShoulder', 'LElbow', 'LWrist', 'RShoulder', 'RElbow', 'RWrist']
@@ -71,9 +89,7 @@ def load_h36m_regressor():
 
 
 def kid_shapedir(v_template):
-    if not os.path.isfile(KID_TEMPLATE):
-        raise SystemExit(f'{KID_TEMPLATE} not found -- AGORA smpl_kid_template.npy (set SMPL_KID_TEMPLATE)')
-    k = np.load(KID_TEMPLATE).astype(np.float64)
+    k = np.load(kid_template_path()).astype(np.float64)
     return (k - k.mean(0)) - v_template
 
 

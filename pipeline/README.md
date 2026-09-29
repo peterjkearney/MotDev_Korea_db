@@ -223,8 +223,10 @@ Layout additions:
 
 `utils/smpl_lite.py` holds the SMPL pieces the shape fit and the refinement
 need (linear shape model, kid blend, skinning at the regressor vertices);
-the kid template is `models/smpl_kid_template.npy` (AGORA; `MODELS_DIR` or
-`SMPL_KID_TEMPLATE`).  Aggregate camera -> trial -> subject -> cohort; the
+the kid template is AGORA's `smpl_kid_template.npy`, a licensed asset kept out
+of git like the SMPL pickle and the MotionBERT weights: put it next to
+`SMPL_NEUTRAL.pkl` in `MotionBERT/data/mesh` on Drive (or in the repo's local
+`models/`, or point `SMPL_KID_TEMPLATE` at it).  Aggregate camera -> trial -> subject -> cohort; the
 subject is the unit of evidence, and the paired differences per subject
 against the recipe are what decide a configuration.
 
