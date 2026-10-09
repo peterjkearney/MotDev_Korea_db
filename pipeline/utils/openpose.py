@@ -3,7 +3,7 @@
 BODY_25 -> H36M-17 conventions here are the SAME as step_1_extract_2d.py's
 coco2h36m (pelvis = mid-hip, thorax = mid-shoulder, spine = mid(pelvis,
 thorax), head = mid-ear), so a MotionBERT run on OpenPose input is directly
-comparable to one on YOLO input.  Korea_db/build_child_gt.py carries the same
+comparable to one on YOLO input.  build_child_gt.py (repo root) carries the same
 two conversions; keep them in step if either changes.
 
 The one deliberate difference from coco2h36m: OpenPose writes a missing joint
@@ -127,7 +127,7 @@ def read_openpose_frame(path):
 
 # One JSON per video.  OpenPose itself writes one file per frame; hundreds of tiny files per
 # camera are slow on Drive, and say nothing about WHICH video frame each one is -- they are
-# numbered by the video OpenPose was given, which tools/run_openpose.py decimates first.
+# numbered by the video OpenPose was given, which datasets/biocv/run_openpose.py decimates first.
 # Reading them by the wrong numbering once desynchronised every OpenPose result.  The
 # per-video file carries `native_frame_idx`, so there is nothing left to guess:
 #

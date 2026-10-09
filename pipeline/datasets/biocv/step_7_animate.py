@@ -28,7 +28,7 @@ Requires only cv2, numpy, matplotlib -- host or container.
           -v /ssd/MotorDevelopment:/ssd/MotorDevelopment \
           -w /ssd/MotorDevelopment/Python/PnP_depth_clean \
           motor-dev:latest \
-          python3 step_7_animate.py --user User28 --action P28_CMJM_01
+          python3 datasets/biocv/step_7_animate.py --user User28 --action P28_CMJM_01
     
 """
 
@@ -40,6 +40,9 @@ import cv2
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))   # pipeline/: config, utils
 
 from config import TRIAL_DIR as _TRIAL_DIR
 

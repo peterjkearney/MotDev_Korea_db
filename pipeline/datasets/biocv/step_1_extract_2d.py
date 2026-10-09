@@ -12,7 +12,7 @@ Run inside the motor-dev container:
       -v /ssd/MotorDevelopment:/ssd/MotorDevelopment \
       -w /ssd/MotorDevelopment/Python/PnP_depth_clean \
       motor-dev:latest \
-      python3 step_1_extract_2d.py --user User28 --action P28_CMJM_01
+      python3 datasets/biocv/step_1_extract_2d.py --user User28 --action P28_CMJM_01
 """
 
 import os
@@ -22,6 +22,9 @@ import argparse
 import numpy as np
 import cv2
 from ultralytics import YOLO
+
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))   # pipeline/: config, utils
 
 from utils.frame_decimation import nearest_frame_indices
 from utils.calibration import load_calib, reproject
@@ -98,7 +101,7 @@ def yolo_track_all_individuals(video_path, model, source_frame_idx):
         if not ret:
             break
         if keep:
-            r = model.track(frame, persist=True,verbose=False,tracker='botsort_custom.yaml')[0]
+            r = model.track(frame, persist=True,verbose=False,tracker=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'botsort_custom.yaml'))[0]
 
             if r.boxes.id is not None:
                 ids  = r.boxes.id.int().cpu().numpy()      # (n,)

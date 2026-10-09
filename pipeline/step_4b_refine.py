@@ -2,7 +2,7 @@
 """step_4b_refine.py -- place MotionBERT's pose in the camera under one or more CONFIGURATIONS.
 
 step_4 is one recipe: MotionBERT's shape, rescaled to the stature, placed rigidly by PnP per
-frame.  This runs the configurations in configs.py, each a different combination of
+frame.  This runs the configurations in formulations.py, each a different combination of
 
     shape        MotionBERT's betas | adult SMPL fitted to bone lengths | kid blend | cohort kid
     placement    rigid PnP | frozen ray rotation with the translation solved | free rotation
@@ -31,7 +31,7 @@ floor).
     python3 step_4b_refine.py                            # every trial, every configuration; done ones skipped
     python3 step_4b_refine.py --configs C8 --user B023
     python3 step_4b_refine.py --configs chain --device cuda
-    python3 configs.py                                   # the legend
+    python3 formulations.py                                   # the legend
 """
 import argparse
 import json
@@ -41,7 +41,7 @@ import time
 import numpy as np
 import torch
 
-import configs
+import formulations
 from config import (DETECTORS, OUT_DIR, twod_path, betas_path, final_betas_path, pnp_path, shapes_path,
                     cohort_shapes_path, calib_path, stature_path, find_cameras, require_out_dir)
 from step_4_PnP import solve_root_pose, parse_joints, _PNP_CONF_THRESH
@@ -357,7 +357,7 @@ def main():
     ap.add_argument('--user', default=None, help='default: every user')
     ap.add_argument('--action', default=None, help='default: every action')
     ap.add_argument('--cameras', default=None, help='comma-separated subset; default every camera with pass-1 rotations')
-    ap.add_argument('--configs', default='all', help="'all', 'chain', 'loo', or comma-separated ids (configs.py)")
+    ap.add_argument('--configs', default='all', help="'all', 'chain', 'loo', or comma-separated ids (formulations.py)")
     ap.add_argument('--device', default='auto', help='cpu | cuda | auto')
     ap.add_argument('--force', action='store_true', help='redo cameras whose output exists')
     ap.add_argument('--verbose', action='store_true', help='print the solver log for every camera')
@@ -370,7 +370,7 @@ def main():
     work = find_cameras(betas_path, args.detector, args.user, args.action, want)
     if not work:
         raise SystemExit(f'no {args.detector} {{cam}}_betas.npz under {OUT_DIR} -- run step_2a first')
-    sel = configs.select(args.configs)
+    sel = formulations.select(args.configs)
     todo = [(u, a, c, cid, cfg) for (u, a, c) in work for cid, cfg in sel
             if args.force or not os.path.exists(pnp_path(u, a, args.detector, c, cid))]
     print(f'{len(work)} camera(s) x {len(sel)} configuration(s) under {OUT_DIR}: {len(todo)} to run, '

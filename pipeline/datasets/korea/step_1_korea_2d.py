@@ -40,8 +40,8 @@ Units.  GT3D files are in metres scaled so the child's measured stature is
 the cohort median; mm here, matching mocap.  Stature is written in the same
 units, so the pipeline is fed the target's own height.
 
-    python3 step_1_korea_2d.py --gt3d /content/data/Korea/GT3D
-    python3 step_1_korea_2d.py --gt3d ... --subjects B010,B011
+    python3 datasets/korea/step_1_korea_2d.py --gt3d /content/data/Korea/GT3D
+    python3 datasets/korea/step_1_korea_2d.py --gt3d ... --subjects B010,B011
 """
 import argparse
 import glob
@@ -49,6 +49,9 @@ import json
 import os
 
 import numpy as np
+
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))   # pipeline/: config, utils
 
 from config import OUT_DIR as _OUT_DIR, twod_path as _twod_path, tri_target_path as _tri_path, require_out_dir
 from utils.calibration import save_calib

@@ -83,7 +83,7 @@ the evaluation step (Procrustes/p_mpjpe), not baked in here.
 Run on host (NOT the motor-dev container — this only needs numpy + ezc3d,
 no torch/YOLO):
     export LD_LIBRARY_PATH=/ssd/miniconda3/lib/python3.13/site-packages/ezc3d:$LD_LIBRARY_PATH
-    python3 step_0_load_mocap.py --user User28 --action P28_CMJM_01
+    python3 datasets/biocv/step_0_load_mocap.py --user User28 --action P28_CMJM_01
 """
 
 import os
@@ -91,6 +91,9 @@ import argparse
 
 import numpy as np
 import ezc3d
+
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))   # pipeline/: config, utils
 
 from utils.frame_decimation import nearest_frame_indices
 

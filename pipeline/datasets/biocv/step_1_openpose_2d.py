@@ -2,7 +2,7 @@
 """step_1_openpose_2d.py -- OpenPose BODY_25 -> H36M-17 2D, the OpenPose counterpart of step_1.
 
 Stream 1 (adults, BioCV).  Reads the one-JSON-per-video OpenPose output that
-tools/run_openpose.py writes and produces the same kind of {cam}_2d.npz
+datasets/biocv/run_openpose.py writes and produces the same kind of {cam}_2d.npz
 step_1_extract_2d.py does for YOLO (h36m_2d, source_frame_idx, video, fps),
 plus body25_2d, which step_1b_triangulate_2d.py needs:
 
@@ -30,15 +30,18 @@ are not counted against them (utils/openpose.pick_person says why).  Frames
 with no acceptable match are written as missing (all zeros), and `detected`
 records which frames matched.
 
-    python3 step_1_openpose_2d.py                                  # everything
-    python3 step_1_openpose_2d.py --user User03 --action P03_CMJM_01 [--cameras 06,07]
-    python3 step_1_openpose_2d.py --dry-run
+    python3 datasets/biocv/step_1_openpose_2d.py                                  # everything
+    python3 datasets/biocv/step_1_openpose_2d.py --user User03 --action P03_CMJM_01 [--cameras 06,07]
+    python3 datasets/biocv/step_1_openpose_2d.py --dry-run
 """
 import argparse
 import glob
 import os
 
 import numpy as np
+
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))   # pipeline/: config, utils
 
 from config import (TRIAL_DIR as _TRIAL_DIR, OUT_DIR as _OUT_DIR, mocap_path as _mocap_path,
                     twod_path as _twod_path, openpose_json_path as _json_path, require_out_dir)
@@ -150,7 +153,7 @@ def main():
     jobs = find_cameras(args.user, args.action, set(args.cameras.split(',')) if args.cameras else None)
     if not jobs:
         raise SystemExit(f'no {{cam}}_openpose.json under {_OUT_DIR} for user={args.user or "*"} '
-                         f'action={args.action or "*"} -- run tools/run_openpose.py first')
+                         f'action={args.action or "*"} -- run datasets/biocv/run_openpose.py first')
     todo = [j for j in jobs if args.force or not os.path.exists(_twod_path(j[0], j[1], 'openpose', j[2]))]
     print(f'{len(jobs)} camera(s) with OpenPose JSONs under {_OUT_DIR}: {len(todo)} to convert, '
           f'{len(jobs) - len(todo)} already done')

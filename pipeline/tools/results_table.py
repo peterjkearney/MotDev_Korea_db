@@ -4,7 +4,7 @@
 One row per (user, action, camera, configuration): the step_8 metrics (placed / smooth MPJPE in
 mm and % of stature, PA-MPJPE, N-MPJPE, per-joint error, bone ratios, signed bias), the
 configuration's settings, the shape it used (betas, kid weight) and the trial's frame counts.
-Configuration 'step4' is step_4's own placement; the others are step_4b's (configs.py).
+Configuration 'step4' is step_4's own placement; the others are step_4b's (formulations.py).
 
 This is the store.  Wide views (one column per configuration) are one pivot away and hold one
 metric each: tools/compare_configs.py makes them, with the paired differences per subject.
@@ -24,7 +24,7 @@ import numpy as np
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
 from config import OUT_DIR, DETECTORS, metrics_path, pnp_path, final_betas_path, shapes_path, require_out_dir  # noqa: E402
-import configs  # noqa: E402
+import formulations  # noqa: E402
 
 SERIES = ('placed_all', 'placed_conf', 'smooth_all', 'smooth_conf')
 
@@ -35,7 +35,7 @@ def trials_with_metrics(detector, gt):
     for p in sorted(glob.glob(metrics_path('*', '*', detector, gt))):
         u, a = os.path.relpath(p, OUT_DIR).split(os.sep)[:2]
         out.append((u, a, 'step4'))
-    for cid in configs.ORDER:
+    for cid in formulations.ORDER:
         for p in sorted(glob.glob(metrics_path('*', '*', detector, gt, cid))):
             u, a = os.path.relpath(p, OUT_DIR).split(os.sep)[:2]
             out.append((u, a, cid))
@@ -48,7 +48,7 @@ def rows_for(user, action, cid, detector, gt):
     cams = [str(c) for c in m['cameras']]
     stature = float(m['stature_mm']) if 'stature_mm' in m.files and np.isfinite(float(m['stature_mm'])) else np.nan
     bones = [str(b) for b in m['bone_names']] if 'bone_names' in m.files else []
-    cfg = configs.CONFIGS.get(cid, {})
+    cfg = formulations.CONFIGS.get(cid, {})
     rows = []
     for i, cam in enumerate(cams):
         row = dict(user=user, action=action, camera=cam, config=cid, gt=gt, detector=detector,
@@ -116,7 +116,7 @@ def main():
         w.writeheader()
         w.writerows(rows)
     os.replace(tmp, out)
-    cfgs = sorted({r['config'] for r in rows}, key=lambda c: (c != 'step4', configs.ORDER.index(c) if c in configs.ORDER else 0))
+    cfgs = sorted({r['config'] for r in rows}, key=lambda c: (c != 'step4', formulations.ORDER.index(c) if c in formulations.ORDER else 0))
     print(f'{len(rows)} rows ({len({(r["user"], r["action"]) for r in rows})} trials, {len({r["user"] for r in rows})} subjects, '
           f'configurations {", ".join(cfgs)}) -> {out}')
 

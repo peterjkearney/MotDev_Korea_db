@@ -7,7 +7,7 @@ flags, in one place, resumable after a Colab disconnect by running it again:
     1. step_1_korea_2d      lay out the usable reps of the usable subjects (per-joint gated target)
     2. step_2a, 2b, 3, 4    MotionBERT (GPU), per-camera betas, skeleton, PnP
     3. step_2c              adult and kid shapes per subject, then the cohort-median kid shape
-    4. step_4b              every configuration (configs.py), GPU when there is one -- subject by subject,
+    4. step_4b              every configuration (formulations.py), GPU when there is one -- subject by subject,
                             each subject scored (step_8) and the tables refreshed as soon as it is done, so
                             {OUT_DIR}/results_table_tri.csv and configs_summary.txt grow while the run goes
     5. step_8               a final scoring pass (anything the per-subject loop missed)
@@ -15,9 +15,9 @@ flags, in one place, resumable after a Colab disconnect by running it again:
 
     %env BIOCV_OUT=/content/drive/MyDrive/MotorDevelopment/Data/Korea
     %env MB_DIR=/content/drive/MyDrive/.../MotionBERT
-    python3 tools/run_korea.py --gt3d /content/drive/MyDrive/.../Korea/B/GT3D
-    python3 tools/run_korea.py --gt3d ... --configs chain --users B010,B011     # a subset
-    python3 tools/run_korea.py --gt3d ... --from step_4b                        # resume from a stage
+    python3 datasets/korea/run_korea.py --gt3d /content/drive/MyDrive/.../Korea/B/GT3D
+    python3 datasets/korea/run_korea.py --gt3d ... --configs chain --users B010,B011     # a subset
+    python3 datasets/korea/run_korea.py --gt3d ... --from step_4b                        # resume from a stage
 """
 import argparse
 import os
@@ -26,7 +26,7 @@ import sys
 import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_PIPE = os.path.dirname(_HERE)
+_PIPE = os.path.dirname(os.path.dirname(_HERE))
 sys.path.insert(0, _PIPE)
 from config import OUT_DIR, require_out_dir  # noqa: E402
 
@@ -46,7 +46,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0], formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--gt3d', required=True, help="build_child_gt.py's output root (rep files + session summaries)")
     ap.add_argument('--users', default=None, help='comma-separated subjects; default every usable one')
-    ap.add_argument('--configs', default='all', help="configs.py selection for step_4b and step_8 ('all', 'chain', 'loo', ids)")
+    ap.add_argument('--configs', default='all', help="formulations.py selection for step_4b and step_8 ('all', 'chain', 'loo', ids)")
     ap.add_argument('--from', dest='start', default='step_1', choices=STAGES, help='resume from this stage')
     ap.add_argument('--device', default='auto', help='step_4b: cpu | cuda | auto')
     ap.add_argument('--stop-on-fail', action='store_true')
@@ -61,7 +61,7 @@ def main():
     ok = True
     for st in stages:
         if st == 'step_1':
-            ok = run('step_1_korea_2d.py', '--gt3d', args.gt3d, *(['--subjects', args.users] if args.users else []))
+            ok = run('datasets/korea/step_1_korea_2d.py', '--gt3d', args.gt3d, *(['--subjects', args.users] if args.users else []))
         elif st in ('step_2a', 'step_2b', 'step_3', 'step_4'):
             script = {'step_2a': 'step_2a_extract_betas.py', 'step_2b': 'step_2b_finalise_betas.py',
                       'step_3': 'step_3_extract_3d.py', 'step_4': 'step_4_PnP.py'}[st]

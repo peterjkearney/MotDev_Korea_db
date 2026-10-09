@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """analyse_results.py -- adults vs children through the MotionBERT pipeline.
 
-Reads the two results tables run_batch.py wrote (one row per trial x camera,
+Reads the two results tables (tools/results_table.py; one row per trial x camera,
 scored against the leave-one-out triangulated-OpenPose target) and asks the
 study's question: does the lifter's output survive the move from adult bodies
 to 3-4.5 year olds?
@@ -34,6 +34,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+DATA = os.path.join(os.path.dirname(HERE), 'data')
 
 # Reference palette (dataviz skill): categorical slots 1 and 2, text/surface tokens.
 COL = {'adult': '#2a78d6', 'child': '#eb6834'}
@@ -142,9 +143,9 @@ def dot_plot(ax, subj, cols, labels, title, xlabel, ref=None, floors=None):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--adult', default=os.path.join(HERE, 'data', 'results_table_tri_BioCV.csv'))
-    ap.add_argument('--child', default=os.path.join(HERE, 'data', 'results_table_tri_KOREA.csv'))
-    ap.add_argument('--out', default=os.path.join(HERE, 'data', 'analysis'))
+    ap.add_argument('--adult', default=os.path.join(DATA, 'results_table_tri_BioCV.csv'))
+    ap.add_argument('--child', default=os.path.join(DATA, 'results_table_tri_KOREA.csv'))
+    ap.add_argument('--out', default=os.path.join(DATA, 'analysis'))
     ap.add_argument('--keep-low-beta', action='store_true',
                     help=f'keep cameras whose shape came from < {MIN_BETA_FRAMES} frames')
     args = ap.parse_args()
@@ -210,7 +211,7 @@ def main():
     tab_j = cohort_table(subj, jcols)
     variant = d.joint_variant.iloc[0]
     say(f'## Per-joint error, % of stature (variant `{variant}` -- the per-joint columns follow '
-        f'run_batch\'s --joint-variant, so these are the *smoothed* skeleton unless it was changed)\n')
+        f'the table\'s joint_variant column, so these are the *smoothed* skeleton unless it was changed)\n')
     say('| joint | adult | child |')
     say('|---|---|---|')
     for j, c in zip(JOINTS, jcols):

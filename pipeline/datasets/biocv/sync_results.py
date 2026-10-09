@@ -9,17 +9,17 @@ Only Analysis/ is copied: every step writes its outputs there, so it is the
 whole output surface of the pipeline. Videos are skipped by default because the
 step_5 / step_7 renders dwarf everything else; the npz results are a few MB.
 
-    python3 tools/sync_results.py --user User28 --action P28_CMJM_01
-    python3 tools/sync_results.py --user User28              # every action
-    python3 tools/sync_results.py --all                      # every trial
-    python3 tools/sync_results.py --all --include-videos
+    python3 datasets/biocv/sync_results.py --user User28 --action P28_CMJM_01
+    python3 datasets/biocv/sync_results.py --user User28              # every action
+    python3 datasets/biocv/sync_results.py --all                      # every trial
+    python3 datasets/biocv/sync_results.py --all --include-videos
 """
 import argparse
 import os
 import shutil
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))   # pipeline/
 from config import TRIAL_DIR, RESULTS_DIR
 
 VIDEO_EXT = ('.mp4', '.avi', '.mov')

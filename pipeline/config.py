@@ -54,7 +54,7 @@ def tri_vs_mocap_path(user, action):
 
 
 def openpose_json_path(user, action, cam):
-    """tools/run_openpose.py: OpenPose's BODY_25 output for one video -- every frame and every
+    """datasets/biocv/run_openpose.py: OpenPose's BODY_25 output for one video -- every frame and every
     person in ONE json, with the native frame number of each entry (utils/openpose.py)."""
     return os.path.join(analysis_dir(user, action), 'keypoints', 'openpose', f'{cam}_openpose.json')
 
@@ -80,7 +80,7 @@ def mesh_pose_path(user, action, detector, cam):
 
 def pnp_path(user, action, detector, cam, config=None):
     """step_4: the skeleton placed in this camera's frame by PnP (per frame) + the smoothed copy.
-    With a configuration id (configs.py), step_4b's placement for it, one folder down."""
+    With a configuration id (formulations.py), step_4b's placement for it, one folder down."""
     return os.path.join(analysis_dir(user, action), 'PnP', detector, *([config] if config else []), f'{cam}_pnp.npz')
 
 
@@ -119,7 +119,7 @@ def depth_video_path(user, action, cam):
 
 
 def openpose_check_path(user, action, cam):
-    """tools/render_openpose_check.py: the video with OpenPose's people, confidences and the projected mocap."""
+    """datasets/biocv/render_openpose_check.py: the video with OpenPose's people, confidences and the projected mocap."""
     return os.path.join(analysis_dir(user, action), 'diagnostics', 'openpose', f'{cam}_openpose_check.mp4')
 
 
@@ -158,6 +158,49 @@ def find_cameras(path_fn, detector, user=None, action=None, cameras=None):
     return out
 
 
+def _subdirs(path):
+    if not os.path.isdir(path):
+        return []
+    return sorted(d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d)))
+
+
+def is_action_dir(user, action):
+    import glob
+    d = os.path.join(TRIAL_DIR, user, action)
+    return (bool(glob.glob(os.path.join(d, '0*.mp4')))
+            or os.path.exists(os.path.join(d, 'markers.c3d'))
+            or bool(glob.glob(os.path.join(d, 'Analysis', 'keypoints', '*_2d.npz'))))
+
+
+def discover(users_filter, actions_filter):
+    """(trials, unmatched) for every {user}/{action} under TRIAL_DIR -- how the input-side tools
+    (run_openpose, check_sync) find trials.  Folder names are matched case-insensitively, so
+    --users user06 finds User06. Names that matched nothing come back in `unmatched` rather than
+    silently narrowing the run to zero trials."""
+    users_lc = {u.lower() for u in users_filter} if users_filter else None
+    actions_lc = {a.lower() for a in actions_filter} if actions_filter else None
+    seen_users, seen_actions, trials = set(), set(), []
+
+    for user in _subdirs(TRIAL_DIR):
+        if users_lc is not None and user.lower() not in users_lc:
+            continue
+        seen_users.add(user.lower())
+        for action in _subdirs(os.path.join(TRIAL_DIR, user)):
+            if not is_action_dir(user, action):
+                continue
+            if actions_lc is not None and action.lower() not in actions_lc:
+                continue
+            seen_actions.add(action.lower())
+            trials.append((user, action))
+
+    unmatched = []
+    if users_lc:
+        unmatched += [u for u in users_filter if u.lower() not in seen_users]
+    if actions_lc:
+        unmatched += [a for a in actions_filter if a.lower() not in seen_actions]
+    return trials, unmatched
+
+
 def require_out_dir():
     """A path under /content/drive with Drive not mounted is silently created on the
     VM's own disk and lost with the runtime -- stop instead."""
@@ -168,7 +211,7 @@ def require_out_dir():
         raise SystemExit(f'OUT_DIR {OUT_DIR} does not exist -- set BIOCV_OUT to the BioCV folder on Drive')
 
 
-# This is a working copy of Python_jetson/PnP_depth_clean, moved into Korea_db
+# This started as a copy of Python_jetson/PnP_depth_clean, moved into child_lifting
 # so it can be amended for the child study without touching the original.
 # MotionBERT and the model weights stay where they were; the original
 # resolved them as ../MotionBERT relative to the script, which no longer

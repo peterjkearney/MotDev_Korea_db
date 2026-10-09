@@ -359,7 +359,7 @@ def score_trial(user, action, cameras, args):
     fig.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
 
-    # Machine-readable twin of the plot, for tools/run_batch.py to aggregate
+    # Machine-readable twin of the plot, for tools/results_table.py to aggregate
     # across trials. Rows follow the same angle-sorted camera order as the
     # chart, so index i means the same camera in both.
     metrics_path = _metrics_path(user, action, args.detector, args.gt, args.config)
@@ -411,17 +411,17 @@ def main():
     ap.add_argument('--force', action='store_true', help='redo trials already scored against this --gt')
     ap.add_argument('--dry-run', action='store_true', help='list what would be scored')
     ap.add_argument('--config', default=None,
-                    help="score step_4b's placement for this configuration id (configs.py) instead of step_4's; "
+                    help="score step_4b's placement for this configuration id (formulations.py) instead of step_4's; "
                          "'all' scores every configuration that has a placement")
     args = ap.parse_args()
 
     require_out_dir()
     if args.config == 'all':
-        import configs
-        for cid in configs.ORDER:
+        import formulations
+        for cid in formulations.ORDER:
             sub = argparse.Namespace(**vars(args))
             sub.config = cid
-            print(f'\n=== configuration {cid}: {configs.CONFIGS[cid]["note"]}')
+            print(f'\n=== configuration {cid}: {formulations.CONFIGS[cid]["note"]}')
             score_all(sub)
     else:
         score_all(args)

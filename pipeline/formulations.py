@@ -1,4 +1,4 @@
-"""configs.py -- the placement configurations step_4b_refine.py runs and step_8 scores.
+"""formulations.py -- the placement configurations step_4b_refine.py runs and step_8 scores.
 
 A configuration is one way of turning MotionBERT's pass-1 rotations into a placed skeleton:
 

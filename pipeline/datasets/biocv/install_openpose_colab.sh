@@ -9,9 +9,9 @@
 # Expect 20-40 minutes.  Run once per session; the result does not survive
 # the runtime, so consider tarring build/ + models/ to Drive afterwards.
 #
-#     !bash tools/install_openpose_colab.sh /content/openpose [tarball]
+#     !bash datasets/biocv/install_openpose_colab.sh /content/openpose [tarball]
 # then
-#     python3 tools/run_openpose.py \
+#     python3 datasets/biocv/run_openpose.py \
 #         --openpose-bin /content/openpose/build/examples/openpose/openpose.bin \
 #         --model-folder /content/openpose/models/
 #

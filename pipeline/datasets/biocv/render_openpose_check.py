@@ -18,8 +18,8 @@ be read; --no-crop keeps the whole frame.
     writes  {OUT_DIR}/.../Analysis/diagnostics/openpose/{cam}_openpose_check.mp4
             (rendered on local disk, then copied)
 
-    python3 tools/render_openpose_check.py --user User03 --action P03_CMJM_01 --camera 01
-    python3 tools/render_openpose_check.py ... --slow 4          # quarter speed
+    python3 datasets/biocv/render_openpose_check.py --user User03 --action P03_CMJM_01 --camera 01
+    python3 datasets/biocv/render_openpose_check.py ... --slow 4          # quarter speed
 """
 import argparse
 import os
@@ -31,7 +31,7 @@ import cv2
 import numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(_HERE))
+sys.path.insert(0, os.path.dirname(os.path.dirname(_HERE)))   # pipeline/
 from config import (TRIAL_DIR, openpose_json_path, mocap_path, calib_path, openpose_check_path, require_out_dir)
 from step_1_openpose_2d import project_mocap
 from utils.openpose import BODY25_NAMES, load_openpose_video, pick_person

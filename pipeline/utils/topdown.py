@@ -1,4 +1,4 @@
-"""topdown.py -- the top-down (X vs depth) skeleton panel shared by step_5 and tools/threshold_sweep.
+"""topdown.py -- the top-down (X vs depth) skeleton panel used by step_5.
 
 The static part (axes, grid, camera marker and field-of-view cone, title, legend) is drawn by
 matplotlib ONCE; the skeletons are composited onto a copy per frame with cv2, through the

@@ -16,7 +16,7 @@ are skipped (--force redoes them).  Needs a GPU in practice.
 
 Missing joints (confidence 0) are filled from the nearest seen frame before
 MotionBERT sees them -- see utils/missing_joints.py; --missing zero keeps
-them at (0,0,0) as the pipeline once did (tools/ladder.py's rung C).
+them at (0,0,0) as the pipeline once did.
 
     python3 step_2a_extract_betas.py                                   # everything, OpenPose
     python3 step_2a_extract_betas.py --detector yolo --user User03 --action P03_CMJM_01
@@ -153,7 +153,7 @@ def main():
     ap.add_argument('--missing', choices=['fill', 'zero'], default='fill',
                     help='joints the detector did not return: filled from the nearest seen frame (default), '
                          'or left at (0,0,0) as before -- which crop_scale puts in the corner of the crop '
-                         '(see utils/missing_joints.py; zero is kept for tools/ladder.py)')
+                         '(see utils/missing_joints.py)')
     ap.add_argument('--force', action='store_true', help='redo cameras whose output already exists')
     ap.add_argument('--dry-run', action='store_true', help='list what would be run, load nothing')
     args = ap.parse_args()

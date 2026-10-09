@@ -1,6 +1,6 @@
-# PnP_depth pipeline — child study copy
+# child_lifting — the PnP_depth pipeline for the child study
 
-A working copy of `Python_jetson/PnP_depth_clean`, amended for two work
+Started as a copy of `Python_jetson/PnP_depth_clean`, amended for two work
 streams.  The original is untouched; MotionBERT and the model weights are
 still read from their original location (`config.py`).
 
@@ -15,6 +15,26 @@ triangulated OpenPose.  Scoring the adults the same way gives a like-for-like
 baseline, and the adults' mocap-vs-triangulated gap says what that yardstick
 itself costs.  The child effect is the difference between the two
 triangulated-target results.
+
+## Code layout
+
+```
+korea_gt/               (repo root) Korea raw -> GT3D: camera sync, self-calibration (camcal),
+                        triangulated ground truth (build_child_gt).  Runs once, before the pipeline.
+pipeline/
+  config.py             where things are: data roots, MotionBERT, one path function per output
+  formulations.py       which placement methods step_4b runs and step_8 scores (C0-C9, L1-L6, R1)
+  step_2a ... step_8    the lifter and its scoring, the same for both cohorts
+  utils/                shared maths (SMPL, triangulation, metrics, smoother, OpenPose conversion)
+  tools/                cohort-independent: results_table, compare_configs, dechumpify_smpl
+  datasets/biocv/       adults' inputs: mocap (step_0), YOLO / OpenPose 2D (step_1*), triangulated
+                        target (step_1b), the OpenPose runner and its checks, the step_7 render
+  datasets/korea/       children's inputs: step_1_korea_2d (GT3D -> trials), run_korea (end to end)
+analysis/               (repo root) adults vs children from the results tables
+```
+
+Run everything from `pipeline/`; the scripts under `datasets/` find `config` and `utils`
+themselves, so `python3 datasets/korea/step_1_korea_2d.py ...` works from there.
 
 ## What changed
 
@@ -48,8 +68,6 @@ triangulated-target results.
   mask.**  All three are synthesised, not detected.  Spine matters: the
   pelvis–thorax midpoint sits ~90 mm from mocap's T10-based Spine on P08
   while every detected joint is within 7 mm — a convention, not an error.
-- `tools/run_batch.py` knows the new steps, discovers cameras without
-  videos, and writes `results_table[_tri].csv`.
 - **`step_2a` fills missing joints before MotionBERT sees them**
   (`utils/missing_joints.py`).  OpenPose's missing joints are `(0,0,0)`, and
   composites (Hip, Thorax, Spine, Head) go missing with any of their parts.
@@ -61,11 +79,11 @@ triangulated-target results.
   (below PnP's 0.4 gate); the `{cam}_2d.npz` files are unchanged.  YOLO never
   emits zeros, so its results do not move; **every OpenPose result, Korea
   included, needs rerunning from step_2a.**  `--missing zero` restores the old
-  behaviour (ladder rung C).
+  behaviour.
 - **OpenPose output is one JSON per video, with its frame numbers.**
   `run_openpose.py` decimates the video before OpenPose sees it, so OpenPose's
   own per-frame files are numbered by the decimated video -- and
-  `step_1_openpose_2d` / `run_batch` defaulted to reading JSON *n* as native
+  `step_1_openpose_2d` defaulted to reading JSON *n* as native
   frame *n*.  Only the first third of the rows found a JSON at all, 3.3x
   time-stretched, so the subject matched the projected mocap on a handful of
   frames.  The per-video `{cam}_openpose.json` now carries `native_frame_idx`,
@@ -107,20 +125,20 @@ openpose|yolo` (default openpose) says whose 2D a step works from, and its
 outputs go to a matching subfolder.  Run with no `--user` / `--action` they
 do every trial, skip what is already done (`--force` to redo) and carry on
 past a failure, so re-running after a disconnect resumes; `--dry-run` lists
-the work.  **Still on the old layout:** the `step_7` render,
-`tools/run_batch.py`, `tools/ladder.py` and `tools/check_sync.py`.
+the work.  **Still on the old layout:** the `step_7` render and
+`datasets/biocv/check_sync.py`.
 
 ## Stream 1 — adults, OpenPose
 
 OpenPose itself is not pip-installable: it is a C++/CUDA build, done once
-per Colab session.  `tools/install_openpose_colab.sh` is the standard recipe
+per Colab session.  `datasets/biocv/install_openpose_colab.sh` is the standard recipe
 (untested here -- see its notes on the two usual failure points: cuDNN, and
 the CMU model server, which has been unreliable for years; the BODY_25
 weights may need fetching from a mirror).  Everything after it is batched:
 
 ```
-bash tools/install_openpose_colab.sh /content/openpose        # 20-40 min, once per session
-python3 tools/run_openpose.py --openpose-bin /content/openpose/build/examples/openpose/openpose.bin \
+bash datasets/biocv/install_openpose_colab.sh /content/openpose        # 20-40 min, once per session
+python3 datasets/biocv/run_openpose.py --openpose-bin /content/openpose/build/examples/openpose/openpose.bin \
                               --model-folder /content/openpose/models/ [--users P08 --actions ...]
 ```
 
@@ -136,12 +154,12 @@ folds every complete one into the new file (no OpenPose build needed for
 that).  Measured: ~77 s per camera on a T4 (cuDNN-free build), ~12 min per
 9-camera trial; `--users/--actions/--cameras` pick a subset.
 
-Then, per trial (or via `run_batch.py`, below):
+Then, per trial (or with no `--user` / `--action` for every trial):
 
 ```
-python3 step_0_load_mocap.py     --user P08 --action P08_CMJM_01
-python3 step_1_openpose_2d.py    --user P08 --action P08_CMJM_01
-python3 step_1b_triangulate_2d.py --user P08 --action P08_CMJM_01     # prints tri-vs-mocap cost
+python3 datasets/biocv/step_0_load_mocap.py     --user P08 --action P08_CMJM_01
+python3 datasets/biocv/step_1_openpose_2d.py    --user P08 --action P08_CMJM_01
+python3 datasets/biocv/step_1b_triangulate_2d.py --user P08 --action P08_CMJM_01     # prints tri-vs-mocap cost
 python3 step_2a_extract_betas.py --user P08 --action P08_CMJM_01     # GPU
 python3 step_2b_finalise_betas.py --user P08 --action P08_CMJM_01
 python3 step_3_extract_3d.py     --user P08 --action P08_CMJM_01     # GPU
@@ -152,14 +170,8 @@ python3 step_8_spider_error.py   --user P08 --action P08_CMJM_01 --gt triangulat
 
 The JSON records which native frame each entry is, so the 2D, the video and
 the mocap share one clock whether OpenPose ran on the decimated or the native
-video.  `tools/check_sync.py` prints the per-trial counts and flags any
-trial where the stages disagree.  Batch:
-
-```
-python3 tools/run_batch.py --gt triangulated \
-    --steps step_0,step_1op,step_1t,step_2a,step_2b,step_3,step_4,step_8
-python3 tools/run_batch.py --gt mocap --steps step_8      # second table, same runs
-```
+video.  `datasets/biocv/check_sync.py` prints the per-trial counts and flags any
+trial where the stages disagree.
 
 ## Stream 2 — children, Korea
 
@@ -171,7 +183,7 @@ commands once the output root points at a Korea folder and the GT3D files
 
 ```
 %env BIOCV_OUT=/content/drive/MyDrive/MotorDevelopment/Data/Korea
-python3 step_1_korea_2d.py --gt3d /content/drive/MyDrive/.../Korea/B/GT3D    # user = subject, action = rep, cameras 1,2,3
+python3 datasets/korea/step_1_korea_2d.py --gt3d /content/drive/MyDrive/.../Korea/B/GT3D    # user = subject, action = rep, cameras 1,2,3
 python3 step_2a_extract_betas.py ; python3 step_2b_finalise_betas.py ; python3 step_3_extract_3d.py
 python3 step_4_PnP.py ; python3 step_6_extract_features.py
 python3 step_8_spider_error.py --gt triangulated
@@ -192,10 +204,10 @@ away two thirds of the frames on a typical rep.
 ### Configurations: the child recipe and its ablations
 
 `step_4` is one recipe (MotionBERT's shape rescaled to the stature, rigid PnP
-per frame).  `configs.py` lists the alternatives that were worked out on the
+per frame).  `formulations.py` lists the alternatives that were worked out on the
 sample reps, as a CHAIN from the original pipeline to the child recipe (C0-C9,
 one change per step), a LEAVE-ONE-OUT set from the recipe (L1-L6) and
-references; `python3 configs.py` prints the legend.  The child recipe (C8) is:
+references; `python3 formulations.py` prints the legend.  The child recipe (C8) is:
 the AGORA kid-blend shape fitted to the subject's bone lengths, MotionBERT's
 rotations as the initialisation only, the global rotation frozen to the
 per-frame ray orientation plus one constant per trial, the translation and the
@@ -209,7 +221,7 @@ python3 step_4b_refine.py [--configs chain|loo|C8,C9] [--device cuda]   # every 
 python3 step_8_spider_error.py --gt triangulated --config all           # score each (PnP/{det}/{config}/ -> diagnostics/{det}/{config}/)
 python3 tools/results_table.py --gt triangulated                        # the long table: one row per trial x camera x config
 python3 tools/compare_configs.py [--baseline C8]                        # wide views per metric, subject medians, paired differences
-python3 tools/run_korea.py --gt3d .../Korea/B/GT3D                      # all of the above in order, resumable
+python3 datasets/korea/run_korea.py --gt3d .../Korea/B/GT3D                      # all of the above in order, resumable
 ```
 
 Layout additions:
@@ -249,24 +261,6 @@ Compare child (triangulated) against adult (triangulated); read adult
 (mocap) vs adult (triangulated) as the yardstick cost.  Same detector, same
 target construction, same per-camera betas on both sides.
 
-## Why did a number change?  The ladder
-
-```
-python3 tools/ladder.py --user User08 --action P08_CMJM_01 --camera 07
-```
-
-Builds variant copies of one trial under `{TRIAL_DIR}/../ladder` and runs
-each through steps 2a-8, so adjacent rungs differ in exactly one thing:
-A YOLO + averaged betas (the original recipe); B YOLO + per-camera betas;
-C OpenPose with missing joints zeroed (the pipeline before step_2a filled
-them); D OpenPose with missing joints filled from the nearest seen frame (the
-pipeline now); E D + a betas gate on the limb joints
-only.  All scored against mocap on the one camera, placed and smoothed.
-Rung F, printed first, needs no lifting: the raw 2D against projected mocap,
-YOLO vs OpenPose.  Rungs A/B regenerate YOLO 2D with `step_1_extract_2d.py`
-(needs ultralytics and the model); `--rungs C,D,E` skips them.  Everything
-lands in the work root, so `run_batch.py` never sees the variants.
-
 ## Looking at a trial
 
 ```
@@ -287,7 +281,7 @@ over a video too.  Written to `Analysis/diagnostics/{cam}_pnp_depth_vs_mocap.mp4
 ## Checking OpenPose against the mocap by eye
 
 ```
-python3 tools/render_openpose_check.py --user User03 --action P03_CMJM_01 --camera 01 [--slow 4]
+python3 datasets/biocv/render_openpose_check.py --user User03 --action P03_CMJM_01 --camera 01 [--slow 4]
 ```
 
 The source video, cropped to the subject, with every person OpenPose found
@@ -296,27 +290,6 @@ beside each joint (red under `--conf`), the projected mocap in green, and a
 status line per frame: people found, the pick, its distance over the joints
 it has, and ACCEPTED / REJECTED under step_1_openpose_2d's rule.  Written to
 `Analysis/diagnostics/openpose/{cam}_openpose_check.mp4`.
-
-## OpenPose vs YOLO through MotionBERT: threshold sweep
-
-```
-python3 tools/threshold_sweep.py [--user User03 --action P03_CMJM_01 --camera 06] \
-        [--thresholds 0,0.2,0.4,0.6,0.8] [--missing zero,fill]
-```
-
-Standalone: one camera, OpenPose and YOLO 2D side by side, each run through
-MotionBERT, single-camera betas, SMPL, PnP and the smoother inside the script
-(nothing under the trial's `Analysis/` is touched).  Joints whose 2D
-confidence is below the threshold are treated as missing before MotionBERT
-sees them, encoded either as `(0,0,0)` or filled from the nearest frame where
-the joint was kept.  One video per threshold and encoding, rendered locally
-and copied to `{RESULTS_DIR}/threshold_sweep/{user}/{action}/`: OpenPose 2D +
-its H36M over the video (top left), YOLO 2D + its H36M (bottom left), and
-step_5's top-down view with mocap and both H36M skeletons (right).
-`{cam}_summary.csv` has MPJPE / PA-MPJPE against mocap, the frames that
-passed the betas gate and PnP successes per run.  Threshold 0 is the plain
-OpenPose-vs-YOLO comparison.  It reads `keypoints/openpose/` and
-`keypoints/yolo/` (see Layout).
 
 ## Floors, measured by feeding the target back through the pipeline
 
@@ -334,7 +307,5 @@ absolute results against them.
   PnP failed (seen: 339 mm vs 47 mm placed on one Korea camera in the
   plumbing test).  Real MotionBERT output has no missing joints, so this is
   less likely in use, but it is another reason to score `placed`.
-- `run_pipeline.sh` is the Jetson/docker runner and is unchanged; use
-  `tools/run_batch.py` on Colab.
 - Korea 2D is 1920×1080 (`K_1080`); the Korea videos are anonymised renders,
   so YOLO cannot be run on them and nothing here reads them.

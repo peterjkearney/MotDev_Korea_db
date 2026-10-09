@@ -5,7 +5,7 @@ composite joint (Hip, Thorax, Spine, Head) missing when any of its parts is.
 MotionBERT's crop_scale leaves such joints out of its bounding box but still
 normalises them, so pixel (0, 0) lands in the top-left corner of the crop --
 and through the 81-frame window one such joint disturbs up to 40 frames either
-side.  Measured on BioCV User03 camera 06 (tools/threshold_sweep.py), that, not
+side.  Measured on BioCV User03 camera 06 (a threshold sweep, since removed), that, not
 the detector, was most of the gap between OpenPose and YOLO skeletons.
 
 So a missing joint is given the same joint's position from the nearest frame

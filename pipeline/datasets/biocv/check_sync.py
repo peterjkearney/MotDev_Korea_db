@@ -8,8 +8,8 @@ and flags the two ways they come apart:
   * a video whose duration disagrees with its mocap -- either the rates
     differ or the fps metadata is wrong -- so the two run at different speeds.
 
-    python3 tools/check_sync.py                 # every trial under TRIAL_DIR
-    python3 tools/check_sync.py --users User08
+    python3 datasets/biocv/check_sync.py                 # every trial under TRIAL_DIR
+    python3 datasets/biocv/check_sync.py --users User08
 """
 import argparse
 import glob
@@ -20,10 +20,9 @@ import cv2
 import numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(_HERE))
+sys.path.insert(0, os.path.dirname(os.path.dirname(_HERE)))   # pipeline/
 sys.path.insert(0, _HERE)
-from config import TRIAL_DIR, mocap_path, openpose_json_path
-from run_batch import discover
+from config import TRIAL_DIR, mocap_path, openpose_json_path, discover
 import json
 
 

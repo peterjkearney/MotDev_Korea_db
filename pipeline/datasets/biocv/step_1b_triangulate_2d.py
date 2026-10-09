@@ -24,15 +24,18 @@ plus tri_vs_mocap.npz next to it: per-joint errors against mocap, also printed.
 With no --user / --action it does every trial with OpenPose 2D for >= 3 cameras;
 trials already done are skipped (--force redoes them).  Needs no video and no GPU.
 
-    python3 step_1b_triangulate_2d.py                                 # everything
-    python3 step_1b_triangulate_2d.py --user User03 --action P03_CMJM_01
-    python3 step_1b_triangulate_2d.py --dry-run
+    python3 datasets/biocv/step_1b_triangulate_2d.py                                 # everything
+    python3 datasets/biocv/step_1b_triangulate_2d.py --user User03 --action P03_CMJM_01
+    python3 datasets/biocv/step_1b_triangulate_2d.py --dry-run
 """
 import argparse
 import glob
 import os
 
 import numpy as np
+
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))   # pipeline/: config, utils
 
 from config import (TRIAL_DIR as _TRIAL_DIR, OUT_DIR as _OUT_DIR, mocap_path as _mocap_path,
                     twod_path as _twod_path, tri_target_path, tri_vs_mocap_path, require_out_dir)

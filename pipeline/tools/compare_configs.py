@@ -25,14 +25,14 @@ import pandas as pd
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
 from config import OUT_DIR  # noqa: E402
-import configs  # noqa: E402
+import formulations  # noqa: E402
 
 METRICS = {'placed_mm': 'err_placed_all_mm', 'placed_pct': 'err_placed_all_pct_stature',
            'pa_mm': 'pa_mpjpe_mm', 'n_mm': 'n_mpjpe_mm'}
 
 
 def order_key(c):
-    return (c != 'step4', configs.ORDER.index(c) if c in configs.ORDER else 99)
+    return (c != 'step4', formulations.ORDER.index(c) if c in formulations.ORDER else 99)
 
 
 def main():
@@ -74,7 +74,7 @@ def main():
                 cells.append(f'{q[1]:6.1f} [{q[0]:5.1f}-{q[2]:5.1f}]')
             else:
                 cells.append(f'{"-":>22}')
-        note = configs.CONFIGS[c]['note'] if c in configs.CONFIGS else "step_4's PnP (hips as run)"
+        note = formulations.CONFIGS[c]['note'] if c in formulations.CONFIGS else "step_4's PnP (hips as run)"
         lines.append(f'{c:8}' + ''.join(f'{x:>22}' for x in cells) + f'   {note}')
     base = args.baseline
     if base in cfgs:

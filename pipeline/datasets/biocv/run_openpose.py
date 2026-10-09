@@ -18,11 +18,11 @@ Per-frame JSON dirs from before this layout ({root}/{user}/{action}/openpose/{ca
 kept in the old results folder) need not be recomputed: --import-from {root} folds any
 complete one into the new file instead of running the binary.
 
-    python3 tools/run_openpose.py --openpose-bin /content/openpose/build/examples/openpose/openpose.bin \\
+    python3 datasets/biocv/run_openpose.py --openpose-bin /content/openpose/build/examples/openpose/openpose.bin \\
                                   --model-folder /content/openpose/models/
-    python3 tools/run_openpose.py ... --users P08 --actions P08_CMJM_01,P08_WALK_01
-    python3 tools/run_openpose.py --import-from /content/drive/MyDrive/MotorDevelopment/results
-    python3 tools/run_openpose.py ... --dry-run
+    python3 datasets/biocv/run_openpose.py ... --users P08 --actions P08_CMJM_01,P08_WALK_01
+    python3 datasets/biocv/run_openpose.py --import-from /content/drive/MyDrive/MotorDevelopment/results
+    python3 datasets/biocv/run_openpose.py ... --dry-run
 
 Throughput: measured on a Colab T4 with the cuDNN-free build, ~5 fps --
 about 77 s per camera, ~12 minutes per 9-camera BioCV trial.  Use
@@ -42,11 +42,10 @@ import time
 import cv2
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_PIPE = os.path.dirname(_HERE)
+_PIPE = os.path.dirname(os.path.dirname(_HERE))
 sys.path.insert(0, _PIPE)
 sys.path.insert(0, _HERE)
-from config import TRIAL_DIR, OUT_DIR, openpose_json_path, require_out_dir
-from run_batch import discover
+from config import TRIAL_DIR, OUT_DIR, openpose_json_path, require_out_dir, discover
 from utils.frame_decimation import nearest_frame_indices
 from utils.openpose import list_openpose_jsons, consolidate_openpose_dir, save_openpose_video
 
