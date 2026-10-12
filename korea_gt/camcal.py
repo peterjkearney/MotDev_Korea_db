@@ -384,13 +384,32 @@ def load_candidates(datapath, subjects=None, actions=None, max_files=None,
     if max_files is not None:
         files = files[:max_files]
 
+    def reps():
+        for i, fname in enumerate(files):
+            if verbose and i % 25 == 0:
+                print(f"\rscanning {i}/{len(files)}", end="")
+            d = np.load(os.path.join(datapath, fname))
+            yield (fname[:-4],
+                   np.stack([d["xy1"], d["xy2"], d["xy3"]], axis=1),        # (T,C,J,2)
+                   np.stack([d["score1"], d["score2"], d["score3"]], 1))   # (T,C,J)
+
+    obs = candidates_from_arrays(reps(), conf_thresh=conf_thresh, min_joints=min_joints,
+                                 min_views=min_views, min_corr=min_corr, stride=stride)
+    if verbose:
+        print(f"\rscanned {len(files)} files -> {len(obs.meta)} candidate frames")
+    return obs
+
+
+def candidates_from_arrays(reps, conf_thresh=0.5, min_joints=None, min_views=2,
+                           min_corr=4, stride=5):
+    """load_candidates' frame filter, for reps already in memory.
+
+    `reps` yields (stub, xy (T,C,J,2), conf (T,C,J)); the subject is the stub's
+    first '_' field.  Used when the reps have been re-synced since they were
+    written to disk (build_child_gt.py's sync refinement).
+    """
     xy_out, vis_out, conf_out, meta = [], [], [], []
-    for i, fname in enumerate(files):
-        if verbose and i % 25 == 0:
-            print(f"\rscanning {i}/{len(files)}", end="")
-        d = np.load(os.path.join(datapath, fname))
-        xy = np.stack([d["xy1"], d["xy2"], d["xy3"]], axis=1)        # (T,C,J,2)
-        conf = np.stack([d["score1"], d["score2"], d["score3"]], 1)  # (T,C,J)
+    for stub, xy, conf in reps:
         vis = (conf > conf_thresh) & ~((xy[..., 0] == 0) & (xy[..., 1] == 0))
 
         if min_joints is not None:                                   # legacy rule
@@ -401,15 +420,12 @@ def load_candidates(datapath, subjects=None, actions=None, max_files=None,
         keep = np.where(good)[0][::stride]
         if len(keep) == 0:
             continue
-        stub = fname[:-4]
         subject = stub.split("_")[0]
         xy_out.append(xy[keep])
         vis_out.append(vis[keep])
         conf_out.append(conf[keep])
         meta.extend((subject, stub, int(t)) for t in keep)
 
-    if verbose:
-        print(f"\rscanned {len(files)} files -> {len(meta)} candidate frames")
     if not meta:
         raise RuntimeError("no candidate frames survived filtering")
 

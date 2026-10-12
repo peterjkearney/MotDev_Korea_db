@@ -185,9 +185,17 @@ def main():
 
             X3 = d['X_h36m_floor'].astype(float) * 1000.0
             sess_bones = summ.get('session_bone_median', {})
-            if args.gate == 'joint':
+            # build_child_gt.py saves its joint gate; use it when the threshold matches, so the two
+            # cannot disagree (older GT3D files: recompute).
+            saved_gate = 'valid_h36m_gated' in d and abs(float(d['joint_bone_dev']) - args.bone_dev) < 1e-9
+            if args.gate == 'joint' and saved_gate:
+                ok_all = d['valid_h36m_gated']
+                n_drop = int((d['valid_h36m'] & ~ok_all).sum())
+            elif args.gate == 'joint':
                 ok_all, n_drop = bone_gate(d['X_h36m_floor'].astype(float), d['valid_h36m'], sess_bones, args.bone_dev)
-                gate_note = (f'joint gate: {int(ok_all.sum())} joints on {int(ok_all.any(1).sum())}/{T} frames '
+            if args.gate == 'joint':
+                gate_note = (f'joint gate{" (saved)" if saved_gate else ""}: {int(ok_all.sum())} joints on '
+                             f'{int(ok_all.any(1).sum())}/{T} frames '
                              f'({n_drop} joints dropped by the {args.bone_dev:.0%} bone check; the frame gate would have kept '
                              f'{int((d["valid_h36m"] & d["frame_usable"][:, None]).sum())} joints on {int(d["frame_usable"].sum())} frames)')
             else:
@@ -197,7 +205,9 @@ def main():
             loo = np.full((len(cams), T, 17, 3), np.nan, np.float32)
             for c in range(len(cams)):
                 Xc = to_floor_mm(d['X_h36m_cam_loo'][c].astype(float), c)
-                if args.gate == 'joint':
+                if args.gate == 'joint' and saved_gate:
+                    ok_c = d['valid_h36m_loo_gated'][c]
+                elif args.gate == 'joint':
                     ok_c, _ = bone_gate(d['X_h36m_cam_loo'][c].astype(float), d['valid_h36m_loo'][c], sess_bones, args.bone_dev)
                 else:
                     ok_c = d['valid_h36m_loo'][c] & d['frame_usable_loo'][c][:, None]

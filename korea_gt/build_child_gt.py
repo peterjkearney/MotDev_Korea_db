@@ -4,11 +4,24 @@
 For every session (subject) in the Korea B set:
 
   1. calibrate the three cameras from the pose data (camcal),
-  2. triangulate every frame of every rep with those cameras, dropping a view
+  2. refine every rep's camera sync: align_cameras.py's offsets are whole frames
+     from one motion signal, so try +-sync_window frames per camera and keep the
+     offsets whose three views triangulate best (needs align_cameras.py's
+     untrimmed tracks; older Aligned/ files are used as they are),
+  3. find reps where one camera disagrees with the other two on nearly every
+     joint -- the camera was moved for those reps -- and drop them,
+  4. recalibrate on the remaining, re-synced reps and refine the sync once more
+     (a calibration fitted to mistimed frames is slightly bent: B010's zooms moved
+     1-2% on recalibration, and the second refinement changed 1 rep of 20),
+  5. triangulate every frame of every rep with those cameras, dropping a view
      when it disagrees with the other two (catches left/right label swaps),
-  3. measure the child's crown-to-sole stature from upright standing frames,
-  4. assess the session, each rep and each frame against quality gates,
-  5. save each usable rep with, per camera c:
+  6. measure the child's crown-to-sole stature from upright standing frames,
+  7. assess the session, each rep and each joint against quality gates.  Joints
+     are gated per bone (a bone > joint_bone_dev from its session median loses
+     its two joints) and a rep is judged on the frames that keep >= 10 of the 12
+     limb joints -- the same rule step_1_korea_2d.py scores with,
+  8. save the session's cameras (always, so failed sessions can be inspected)
+     and each usable rep with, per camera c:
        - the pipeline INPUT: camera c's OpenPose 2D converted to the H36M-17
          (x, y, conf) array step_1 would have produced, plus intrinsics and
          stature -- enough to run step_2a onwards;
@@ -90,12 +103,22 @@ GATES = dict(
     max_long_bone_cv_pct=8.0,      # depth distortion makes bones breathe
     min_floor_inlier_frac=0.6,
     min_upright_frames=15,         # to measure stature at all
+    # sync refinement
+    sync_window=4,                 # frames tried either side, per camera, per pass
+    sync_max_passes=3,             # re-centre and search again while the best sits at the edge
+    sync_stride=2,                 # frames used when scoring an offset
+    sync_min_joints=200,           # 3-view joints needed to judge an offset at all
+    # moved camera: kept on few joints while the other two agree
+    moved_max_kept_pct=50.0,       # % of its 3-view joints the robust triangulation keeps
+    moved_min_others_kept_pct=80.0,
+    moved_min_joints=50,
     # triangulation
     conf_thresh=0.5,
     reproj_thresh_px=15.0,         # per view, 1080p pixels
-    # frame
-    min_core_joints=10,            # of the 12 H36M limb joints
-    max_frame_bone_dev=0.15,       # any bone vs its session median
+    # joint / frame
+    joint_bone_dev=0.25,           # a bone this far from its session median loses its two joints
+    min_core_joints=10,            # of the 12 H36M limb joints, after the joint gate
+    max_frame_bone_dev=0.15,       # the old whole-frame rule, still saved as frame_usable
     # rep
     min_usable_frames=30,          # one second at the dataset's 30 fps
     min_usable_frac=0.25,
@@ -176,6 +199,38 @@ def bone_lengths(P, ok):
     return {k: np.stack(v, axis=1) for k, v in out.items()}
 
 
+# The bones of cc.BONES on H36M-17 joints (BODY_25 neck = H36M Thorax, mid-hip = Hip), so the
+# session medians computed on BODY_25 apply unchanged.
+H36M_BONES = {'torso': [('Hip', 'Thorax')],
+              'clavicle': [('Thorax', 'RShoulder'), ('Thorax', 'LShoulder')],
+              'upperarm': [('RShoulder', 'RElbow'), ('LShoulder', 'LElbow')],
+              'forearm': [('RElbow', 'RWrist'), ('LElbow', 'LWrist')],
+              'hip_offset': [('Hip', 'RHip'), ('Hip', 'LHip')],
+              'thigh': [('RHip', 'RKnee'), ('LHip', 'LKnee')],
+              'shank': [('RKnee', 'RAnkle'), ('LKnee', 'LAnkle')]}
+
+
+def joint_gate(Xh, okh, sess_bones, thresh=GATES['joint_bone_dev']):
+    """Per-bone check on H36M joints: a bone further than `thresh` (fraction) from its session
+    median clears both its joints.  Xh (T,17,3) in any rigid frame, same units as sess_bones.
+    Returns the gated (T,17) mask.  step_1_korea_2d.py reads it rather than recomputing."""
+    ok = okh.copy()
+    drop = np.zeros_like(ok)
+    J = {n: i for i, n in enumerate(H36M_NAMES)}
+    for name, pairs in H36M_BONES.items():
+        ref = sess_bones.get(name)
+        if not ref:
+            continue
+        for a, b in pairs:
+            ia, ib = J[a], J[b]
+            both = ok[:, ia] & ok[:, ib]
+            L = np.linalg.norm(Xh[:, ia] - Xh[:, ib], axis=-1)
+            bad = both & (np.abs(L / ref - 1) > thresh)
+            drop[bad, ia] = True
+            drop[bad, ib] = True
+    return ok & ~drop
+
+
 def _angle_deg(u, v):
     cu = np.einsum('ij,ij->i', u, v) / (
         np.linalg.norm(u, axis=1) * np.linalg.norm(v, axis=1) + 1e-12)
@@ -230,13 +285,103 @@ def build_video_index(video_dir):
     return idx
 
 
+def load_reps(data_dir, subject):
+    """Every synced rep of one session, as dicts the sync refinement can re-trim.
+
+    align_cameras.py files carry each camera's untrimmed track and the offsets it chose
+    (`lag` = (lag12, lag13): camera 1 row i+lag1c shows the same instant as camera c row i).
+    Older Aligned/ files (merge_cameras.ipynb) hold only the trimmed span: they are taken as
+    their own 'raw' track at offset (0, 0), so the refinement can still shift them, losing a
+    frame or two at the ends.
+    """
+    reps = []
+    for fn in sorted(f for f in os.listdir(data_dir)
+                     if f.startswith(subject + '_') and f.endswith('.npz') and not f.startswith('.')):
+        d = np.load(os.path.join(data_dir, fn))
+        full = 'raw_xy1' in d
+        key = 'raw_' if full else ''
+        reps.append(dict(
+            stub=fn[:-4],
+            raw_xy=[d[f'{key}xy{c}'].astype(float) for c in (1, 2, 3)],
+            raw_conf=[d[f'{key}score{c}'].astype(float) for c in (1, 2, 3)],
+            frame_index=[d[f'frame_index{c}'] for c in (1, 2, 3)] if full else None,
+            lag0=(int(d['lag12']), int(d['lag13'])) if full else (0, 0),
+            people=[],
+        ))
+        reps[-1]['lag'] = reps[-1]['lag0']
+        # align_cameras.py found more than one combination of people that moves alike in all
+        # three cameras: keep them all, choose_person settles it by body size.
+        if 'candidates' in d and len(d['candidates']) > 1:
+            for row in d['candidates']:
+                combo = [int(i) for i in row[1:4]]
+                reps[-1]['people'].append(dict(
+                    combo=combo, lag=(int(row[4]), int(row[5])),
+                    raw_xy=[d[f'tracks_xy{c + 1}'][combo[c]].astype(float) for c in range(3)],
+                    raw_conf=[d[f'tracks_score{c + 1}'][combo[c]].astype(float) for c in range(3)]))
+    return reps
+
+
+def choose_person(cams, rep):
+    """For a rep with several candidate people: the smallest body among those that triangulate well.
+
+    An adult moving with the child (demonstrating, holding hands) can correlate across the
+    cameras as well as the child does, so movement alone cannot always tell them apart; size
+    can.  Each candidate is triangulated with the session's cameras; those within 1.5x the best
+    reprojection are compared by the median of torso + thigh + shank, and the smallest is kept.
+    Returns a record of the choice (empty if there was nothing to choose).
+    """
+    if len(rep['people']) < 2:
+        return {}
+    scored = []
+    for k, p in enumerate(rep['people']):
+        trial = dict(rep, raw_xy=p['raw_xy'], raw_conf=p['raw_conf'], lag=p['lag'])
+        err = sync_error(cams, trial, trial['lag'])
+        xy, conf, _ = rep_span(trial)
+        vis = (conf > GATES['conf_thresh']) & ~((xy[..., 0] == 0) & (xy[..., 1] == 0))
+        X, ok, _, _ = cc.triangulate_robust(cams, xy, vis, GATES['reproj_thresh_px'])
+        bl = bone_lengths(X, ok)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            size = float(np.nansum([np.nanmedian(bl[k2]) for k2 in ('torso', 'thigh', 'shank') if k2 in bl]))
+        scored.append((k, err, size if size > 0 else np.nan))
+    errs = np.array([e for _, e, _ in scored])
+    if not np.isfinite(errs).any():
+        return {}
+    good = [s for s in scored if np.isfinite(s[1]) and s[1] <= 1.5 * np.nanmin(errs) and np.isfinite(s[2])]
+    k = min(good, key=lambda s: s[2])[0] if good else int(np.nanargmin(errs))
+    p = rep['people'][k]
+    rep.update(raw_xy=p['raw_xy'], raw_conf=p['raw_conf'], lag0=p['lag'], lag=p['lag'])
+    return dict(person_candidates=len(scored), person_chosen=k, person_combo=p['combo'],
+                person_err_px=[round(e, 2) for _, e, _ in scored], person_size=[round(s, 3) for _, _, s in scored])
+
+
+def rep_span(rep, lag=None):
+    """(xy (T,3,25,2), conf (T,3,25), start (3,)) for a rep at offsets `lag` (default: its current)."""
+    l12, l13 = rep['lag'] if lag is None else lag
+    s1 = max(0, l12, l13)
+    start = np.array([s1, s1 - l12, s1 - l13])
+    T = int(min(len(x) - s for x, s in zip(rep['raw_xy'], start)))
+    if T <= 0:
+        return np.zeros((0, 3, 25, 2)), np.zeros((0, 3, 25)), start
+    xy = np.stack([x[s:s + T] for x, s in zip(rep['raw_xy'], start)], axis=1)
+    conf = np.stack([c[s:s + T] for c, s in zip(rep['raw_conf'], start)], axis=1)
+    return xy, conf, start
+
+
+def stored_frame_mapping(rep, start, T, cam):
+    """(video_idx, json_frame_index) of every synced row, from align_cameras.py's saved tracks."""
+    rows = start[cam] + np.arange(T)
+    return rows, rep['frame_index'][cam][rows]
+
+
 def frame_mapping(json_dir, stub, cam, aligned_xy):
     """Source-video frame index of every aligned row, for one camera.
 
     merge_cameras trimmed each camera's start by its sync lag but did not
     save the lags, so recover the offset by matching the aligned keypoints
     against the camera's own JSON (identical floats).  Returns (video_idx,
-    json_frame_index), or (None, None) if no unique match.
+    json_frame_index), or (None, None) if no unique match.  Only needed for
+    the old Aligned/ files; align_cameras.py's carry the mapping.
     """
     path = os.path.join(json_dir, f'{stub}_{cam}.json')
     if not os.path.exists(path):
@@ -308,7 +453,8 @@ def jsonable(x, decimals=JSON_DECIMALS):
 # One session
 # --------------------------------------------------------------------------
 
-def calibrate(subject, args):
+def calibrate(subject, reps, args):
+    """One calibration from the given reps (each at its current sync offsets)."""
     # Two tiers.  Measured on common clean frames, calibrating only on frames
     # where the whole body is well detected in every camera is slightly more
     # accurate (~5% lower held-out-camera error on B010, a tie on B011): a
@@ -317,16 +463,19 @@ def calibrate(subject, args):
     # seen by all three cameras, so fall back to treating every joint seen by
     # two or more cameras as a correspondence.  Never worse than the strict
     # rule alone; the fallback is recorded in the summary.
+    def arrays():
+        for r in reps:
+            xy, conf, _ = rep_span(r)
+            yield r['stub'], xy, conf
+
     try:
-        cand = cc.load_candidates(args.data, subjects=[subject], conf_thresh=0.6,
-                                  min_joints=20, stride=6, verbose=False)
+        cand = cc.candidates_from_arrays(arrays(), conf_thresh=0.6, min_joints=20, stride=6)
         obs = cc.select_spread(cand, n_frames=250, min_frames=GATES['min_calib_frames_strict'])
         rule = 'strict'
-    except cc.InsufficientData:
-        cand = cc.load_candidates(args.data, subjects=[subject],
-                                  conf_thresh=GATES['calib_conf_thresh'],
-                                  min_views=2, min_corr=GATES['calib_min_corr_per_frame'],
-                                  stride=args.calib_stride, verbose=False)
+    except (cc.InsufficientData, RuntimeError):
+        cand = cc.candidates_from_arrays(arrays(), conf_thresh=GATES['calib_conf_thresh'],
+                                         min_views=2, min_corr=GATES['calib_min_corr_per_frame'],
+                                         stride=args.calib_stride)
         obs = cc.select_spread(cand, n_frames=args.calib_max_frames,
                                target_corr=args.calib_corr,
                                min_frames=GATES['min_calib_frames'],
@@ -352,6 +501,115 @@ def calibrate(subject, args):
                 axis_miss_m=info['miss'])
 
 
+def sync_error(cams, rep, lag, stride=GATES['sync_stride']):
+    """Median reprojection (px) of the joints all three cameras see, with the rep at offsets `lag`.
+
+    With the right offsets the three views show one instant and their rays meet; a frame off,
+    a moving joint is in three different places and the error rises.  NaN if too few joints.
+    """
+    xy, conf, _ = rep_span(rep, lag)
+    xy, conf = xy[::stride], conf[::stride]
+    if len(xy) < 10:
+        return float('nan')
+    vis = (conf > GATES['conf_thresh']) & ~((xy[..., 0] == 0) & (xy[..., 1] == 0))
+    vis &= vis.all(axis=1, keepdims=True)
+    if vis[:, 0].sum() < GATES['sync_min_joints']:
+        return float('nan')
+    X, _ = cc.triangulate(cams, xy, vis)
+    return float(np.nanmedian(cc.reprojection_per_view(cams, X, xy, vis)))
+
+
+def refine_sync(cams, rep):
+    """Move the rep's offsets to the best-triangulating pair within +-sync_window per camera.
+
+    Re-centres and searches again while the best sits on the window's edge (up to
+    sync_max_passes).  Returns (error at the starting offsets, error at the chosen ones).
+    """
+    W = GATES['sync_window']
+    lag = tuple(rep['lag'])
+    err0 = sync_error(cams, rep, lag)
+    if not np.isfinite(err0):
+        return err0, err0
+    best_err = err0
+    for _ in range(GATES['sync_max_passes']):
+        errs = {(lag[0] + a, lag[1] + b): sync_error(cams, rep, (lag[0] + a, lag[1] + b))
+                for a in range(-W, W + 1) for b in range(-W, W + 1)}
+        errs = {k: e for k, e in errs.items() if np.isfinite(e)}
+        best = min(errs, key=errs.get)
+        best_err = errs[best]
+        at_edge = max(abs(best[0] - lag[0]), abs(best[1] - lag[1])) == W
+        lag = best
+        if not at_edge:
+            break
+    rep['lag'] = lag
+    return err0, best_err
+
+
+def camera_check(cams, rep):
+    """Per camera: % of its 3-view joints the robust triangulation keeps.
+
+    A camera in the right place is kept on ~95%; one that was moved for this rep disagrees
+    with the other two on every joint and is kept on ~0%.  NaN with too few joints.
+    """
+    xy, conf, _ = rep_span(rep)
+    vis = (conf > GATES['conf_thresh']) & ~((xy[..., 0] == 0) & (xy[..., 1] == 0))
+    _, _, used, _ = cc.triangulate_robust(cams, xy, vis, GATES['reproj_thresh_px'])
+    three = vis.all(axis=1)
+    return np.array([100 * used[:, c][three].mean() if three.sum() >= GATES['moved_min_joints']
+                     else np.nan for c in range(3)])
+
+
+def moved_cameras(kept):
+    """Cameras kept on few joints while both others are kept on most."""
+    out = []
+    for c in range(3):
+        others = np.delete(kept, c)
+        if (np.isfinite(kept[c]) and kept[c] < GATES['moved_max_kept_pct']
+                and np.all(others >= GATES['moved_min_others_kept_pct'])):
+            out.append(c)
+    return out
+
+
+def calibrate_and_sync(subject, reps, args):
+    """Calibrate, refine every rep's sync, drop moved-camera reps, recalibrate, refine again.
+
+    Returns (cal, sync_info, moved) where sync_info[stub] records the offsets and errors and
+    moved[stub] lists the camera indices judged moved under the final calibration.
+    """
+    info = {r['stub']: dict(lag_align=r['lag0']) for r in reps}
+    cal = calibrate(subject, reps, args)
+    n_cal = 1
+    for r in reps:
+        choice = choose_person(cal['cams'], r)
+        if choice:
+            info[r['stub']].update(choice, lag_align=r['lag0'])
+    for r in reps:
+        e0, e1 = refine_sync(cal['cams'], r)
+        info[r['stub']].update(err_align=e0, lag_pass1=r['lag'], err_pass1=e1)
+    kept = {r['stub']: camera_check(cal['cams'], r) for r in reps}
+    moved = {s: moved_cameras(k) for s, k in kept.items()}
+    good = [r for r in reps if not moved[r['stub']]]
+    changed = (sum(info[r['stub']]['lag_pass1'] != r['lag0'] for r in reps)
+               + sum(info[r['stub']].get('person_chosen', 0) != 0 for r in reps))
+    if changed or len(good) < len(reps):
+        try:
+            cal = calibrate(subject, good, args)
+            n_cal = 2
+        except cc.InsufficientData:
+            pass                              # keep the first; recorded below
+        for r in good:
+            e0, e1 = refine_sync(cal['cams'], r)
+            info[r['stub']].update(lag_pass2=r['lag'], err_pass2=e1)
+        kept = {r['stub']: camera_check(cal['cams'], r) for r in reps}
+        moved = {s: moved_cameras(k) for s, k in kept.items()}
+    for s in info:
+        info[s]['kept_pct'] = kept[s]
+        info[s]['lag_final'] = next(tuple(r['lag']) for r in reps if r['stub'] == s)
+    cal['n_calibrations'] = n_cal
+    cal['n_sync_changed'] = sum(info[s]['lag_final'] != info[s]['lag_align'] for s in info)
+    return cal, info, moved
+
+
 def process_session(subject, args, video_index):
     t0 = time.time()
     sess_dir = os.path.join(args.out, subject)
@@ -367,9 +625,13 @@ def process_session(subject, args, video_index):
             json.dump(jsonable(summary), f, indent=1)
         return summary
 
-    # ---- 1. calibrate ----------------------------------------------------
+    # ---- 1-4. calibrate, refine sync, drop moved-camera reps, recalibrate --
+    loaded = load_reps(args.data, subject)
+    if not loaded:
+        summary.update(status='skipped', reasons=['no synced reps'])
+        return finish()
     try:
-        cal = calibrate(subject, args)
+        cal, sync_info, moved = calibrate_and_sync(subject, loaded, args)
     except cc.InsufficientData as e:
         summary.update(status='skipped', reasons=[str(e).split('.')[0]])
         return finish()
@@ -385,15 +647,12 @@ def process_session(subject, args, video_index):
     bstats = cc.bone_stats(prob, cal['X'], cal['L'])
     long_cv = float(np.median([bstats[k]['cv_pct'] for k in LONG_BONES if k in bstats]))
 
-    # ---- 2. triangulate every frame of every rep -------------------------
-    files = sorted(f for f in os.listdir(args.data)
-                   if f.startswith(subject + '_') and f.endswith('.npz')
-                   and not f.startswith('.'))
+    # ---- 5. triangulate every frame of every rep -------------------------
     reps = []
-    for fn in files:
-        d = np.load(os.path.join(args.data, fn))
-        xy = np.stack([d['xy1'], d['xy2'], d['xy3']], axis=1).astype(float)
-        conf = np.stack([d['score1'], d['score2'], d['score3']], axis=1).astype(float)
+    for src in loaded:
+        xy, conf, start = rep_span(src)
+        if len(xy) == 0:
+            continue
         vis = (conf > GATES['conf_thresh']) & ~((xy[..., 0] == 0) & (xy[..., 1] == 0))
         X, ok, used, err = cc.triangulate_robust(cams, xy, vis, GATES['reproj_thresh_px'])
         # Leave-one-camera-out targets.  The model's input is camera c's
@@ -406,15 +665,18 @@ def process_session(subject, args, video_index):
             Xl, okl, _, _ = cc.triangulate_robust(cams, xy, v, GATES['reproj_thresh_px'])
             X_loo.append(Xl)
             ok_loo.append(okl)
-        reps.append(dict(stub=fn[:-4], xy=xy, conf=conf, X=X, ok=ok,
-                         used=used, err=err,
+        reps.append(dict(stub=src['stub'], src=src, start=start, xy=xy, conf=conf, X=X, ok=ok,
+                         used=used, err=err, moved=moved[src['stub']],
                          X_loo=np.stack(X_loo), ok_loo=np.stack(ok_loo)))
 
-    # ---- 3. stature, then the final unit ---------------------------------
+    # ---- 6. stature, then the final unit ---------------------------------
+    # Moved-camera reps are triangulated (their two good cameras still agree) but kept out of
+    # the session's stature and bone medians.
+    calib_reps = [r for r in reps if not r['moved']] or reps
     floor0 = cc.gravity_frame(cams, cal['normal'], cal['offset'])
     Rw, org = floor0['R_world_to_floor'], floor0['origin']
-    allX = np.concatenate([r['X'] for r in reps])
-    allok = np.concatenate([r['ok'] for r in reps])
+    allX = np.concatenate([r['X'] for r in calib_reps])
+    allok = np.concatenate([r['ok'] for r in calib_reps])
     st = measure_stature((allX - org) @ Rw.T, allok)
 
     s = 1.0
@@ -429,12 +691,12 @@ def process_session(subject, args, video_index):
     floor = cc.gravity_frame(cams, cal['normal'], offset)
     Rw, org = floor['R_world_to_floor'], floor['origin']
 
-    # session-median bone lengths, for the frame and rep gates
-    allX = np.concatenate([r['X'] for r in reps])
+    # session-median bone lengths, for the joint, frame and rep gates
+    allX = np.concatenate([r['X'] for r in calib_reps])
     sess_bones = {k: float(np.nanmedian(v))
                   for k, v in bone_lengths(allX, allok).items()}
 
-    # ---- 4. session gates ------------------------------------------------
+    # ---- 7. session gates ------------------------------------------------
     ratio = float(calib_med.max() / epi) if np.isfinite(epi) and epi > 0 else float('nan')
     roll = float(np.abs(floor['roll_deg']).max())
     checks = [
@@ -464,7 +726,19 @@ def process_session(subject, args, video_index):
         camera_roll_deg=floor['roll_deg'], camera_plan=floor['plan'],
         axis_miss=cal['axis_miss_m'] * s,
         stature=stature, stature_measure=st, unit_scale=s,
-        session_bone_median=sess_bones)
+        session_bone_median=sess_bones,
+        n_calibrations=cal['n_calibrations'], n_reps_sync_changed=cal['n_sync_changed'],
+        moved_camera_reps={k: [c + 1 for c in v] for k, v in moved.items() if v})
+
+    # The session's cameras, whatever the verdict: failed sessions can then be inspected
+    # without recalibrating.  Offsets are per rep (camera 1 row i+lag1c == camera c row i).
+    np.savez(os.path.join(sess_dir, 'session_cameras.npz'),
+             R_world_to_cam=cams.R, t_world_to_cam=cams.t, f=cams.f, cx=cams.cx, cy=cams.cy,
+             R_world_to_floor=Rw, floor_origin=org, unit_scale=s, usable=session_ok,
+             stubs=np.array([r['stub'] for r in reps]),
+             lag_align=np.array([sync_info[r['stub']]['lag_align'] for r in reps]),
+             lag_final=np.array([sync_info[r['stub']]['lag_final'] for r in reps]),
+             kept_pct=np.array([sync_info[r['stub']]['kept_pct'] for r in reps]))
 
     if np.isfinite(stature):
         with open(os.path.join(sess_dir, 'user_meta.json'), 'w') as f:
@@ -474,7 +748,7 @@ def process_session(subject, args, video_index):
                                'skeletons (see session_summary.json unit_scale)'},
                       f, indent=1)
 
-    # ---- 5. per rep: gates, camera frames, save ---------------------------
+    # ---- 8. per rep: gates, camera frames, save ---------------------------
     R_wc = cams.R                                           # (3,3,3)
     K1080 = np.stack([[[cams.f[c], 0, cams.cx[c]], [0, cams.f[c], cams.cy[c]], [0, 0, 1.0]]
                       for c in range(3)])
@@ -498,10 +772,14 @@ def process_session(subject, args, video_index):
         n_core = okh[:, H36M_CORE].sum(axis=1)
         frame_ok = ((n_core >= GATES['min_core_joints'])
                     & (frame_dev <= GATES['max_frame_bone_dev']))   # NaN compares False
+        # The joint gate: what is scored, and what the rep is judged on.
+        okg = joint_gate(Xh, okh, sess_bones)
+        frame_ok_joint = okg[:, H36M_CORE].sum(axis=1) >= GATES['min_core_joints']
 
-        # the same frame gates, applied to each camera's leave-one-out target
+        # the same gates, applied to each camera's leave-one-out target
         frame_ok_loo = np.zeros((3, T), bool)
-        Xh_loo, okh_loo = [], []
+        frame_ok_loo_joint = np.zeros((3, T), bool)
+        Xh_loo, okh_loo, okg_loo = [], [], []
         for c in range(3):
             Xl, okl = r['X_loo'][c], r['ok_loo'][c]
             blc = bone_lengths(Xl, okl)
@@ -512,8 +790,10 @@ def process_session(subject, args, video_index):
             hl, hok = body25_to_h36m(Xl, okl)
             Xh_loo.append(hl)
             okh_loo.append(hok)
+            okg_loo.append(joint_gate(hl, hok, sess_bones))
             frame_ok_loo[c] = ((hok[:, H36M_CORE].sum(axis=1) >= GATES['min_core_joints'])
                                & (fdev <= GATES['max_frame_bone_dev']))
+            frame_ok_loo_joint[c] = okg_loo[c][:, H36M_CORE].sum(axis=1) >= GATES['min_core_joints']
 
         # rep gates
         rep_ratio = float(np.nanmax(rep_med / calib_med)) if np.isfinite(rep_med).any() else float('inf')
@@ -523,12 +803,20 @@ def process_session(subject, args, video_index):
         # Provenance only: the videos are rendered stick figures, not footage,
         # so nothing downstream needs them -- but the original JSON frame of
         # every row is worth keeping.
-        maps = [frame_mapping(args.json_dir, r['stub'], c + 1, r['xy'][:, c]) for c in range(3)]
+        if r['src']['frame_index'] is not None:
+            maps = [stored_frame_mapping(r['src'], r['start'], T, c) for c in range(3)]
+        else:
+            maps = [frame_mapping(args.json_dir, r['stub'], c + 1, r['xy'][:, c]) for c in range(3)]
         videos = [video_index.get(f"{r['stub']}_{c + 1}", '') for c in range(3)]
-        n_ok = int(frame_ok.sum())
+        n_ok = int(frame_ok_joint.sum())
+        si = sync_info[r['stub']]
+        kept = si['kept_pct']
 
         rchecks = [
             (session_ok, 'session not usable'),
+            (not r['moved'],
+             '; '.join(f'camera {c + 1} moved (kept on {kept[c]:.0f}% of its joints, the others '
+                       f'{np.nanmin(np.delete(kept, c)):.0f}%+)' for c in r['moved'])),
             (n_ok >= GATES['min_usable_frames'],
              f'{n_ok} usable frames (min {GATES["min_usable_frames"]})'),
             (n_ok / max(T, 1) >= GATES['min_usable_frac'],
@@ -545,12 +833,19 @@ def process_session(subject, args, video_index):
                    reasons=[m for p, m in rchecks if not p],
                    n_frames=T, n_usable_frames=n_ok,
                    usable_frac=n_ok / max(T, 1),
+                   n_usable_frames_frame_rule=int(frame_ok.sum()),
+                   sync_lag_align=si['lag_align'], sync_lag=si['lag_final'],
+                   sync_err_align_px=si.get('err_align'),
+                   sync_err_px=si.get('err_pass2', si.get('err_pass1')),
+                   camera_kept_pct=kept, moved_cameras=[c + 1 for c in r['moved']],
+                   person={k: si[k] for k in ('person_candidates', 'person_chosen', 'person_combo',
+                                              'person_err_px', 'person_size') if k in si} or None,
                    median_reproj_px=rep_med, reproj_over_session=rep_ratio,
                    bone_dev=rep_dev,
                    view_dropped_frac=float(((r['used'].sum(axis=1) == 2)
                                             & (r['conf'] > GATES['conf_thresh']).all(axis=1)
                                             & ok).sum() / max(ok.sum(), 1)),
-                   n_usable_frames_loo=frame_ok_loo.sum(axis=1),
+                   n_usable_frames_loo=frame_ok_loo_joint.sum(axis=1),
                    frame_mapping_found=[m[0] is not None for m in maps],
                    saved=False)
 
@@ -578,12 +873,16 @@ def process_session(subject, args, video_index):
                 stature_m=np.float64(stature),
                 K_1080=K1080, dist=np.zeros((3, 5)), image_size_1080=np.array(IMAGE_SIZE),
                 #
-                # TARGET for camera c: X_h36m_cam_loo[c], scored on frame_usable_loo[c].
+                # TARGET for camera c: X_h36m_cam_loo[c], scored where valid_h36m_loo_gated[c].
                 # Triangulated from the OTHER two cameras, so the input's own
-                # detections do not shape the target.
+                # detections do not shape the target.  The gated masks are the joint
+                # gate (joint_gate); valid_* are triangulation only; frame_usable* are
+                # the old whole-frame rule, kept for comparison.
                 X_h36m_cam_loo=Xh_loo_c.astype(np.float32),
                 valid_h36m_loo=np.stack(okh_loo),
+                valid_h36m_loo_gated=np.stack(okg_loo),
                 frame_usable_loo=frame_ok_loo,
+                frame_usable_loo_joint=frame_ok_loo_joint,
                 eval_joint_mask_h36m=np.array([n not in ('Nose', 'Head') for n in H36M_NAMES]),
                 h36m_joint_names=np.array(H36M_NAMES),
                 #
@@ -593,8 +892,12 @@ def process_session(subject, args, video_index):
                 X_h36m_cam=Xhc.astype(np.float32),
                 X_body25_cam=Xc.astype(np.float32),
                 valid_h36m=okh, valid_body25=ok,
+                valid_h36m_gated=okg,
+                joint_bone_dev=np.float64(GATES['joint_bone_dev']),
                 X_h36m_floor=Xh_floor.astype(np.float32),
                 frame_usable=frame_ok,
+                frame_usable_joint=frame_ok_joint,
+                sync_lag=np.array(si['lag_final']), sync_lag_align=np.array(si['lag_align']),
                 #
                 # provenance: the videos are rendered stick figures (no footage)
                 K_720=K720, image_size_720=np.array(VIDEO_SIZE),
@@ -636,7 +939,9 @@ def write_tables(out_root):
                                      'reproj_over_epipolar', 'epipolar_floor_px',
                                      'long_bone_cv_pct', 'floor_inlier_frac',
                                      'stature', 'unit_scale', 'n_reps',
-                                     'n_reps_usable', 'n_frames_usable', 'seconds')}
+                                     'n_reps_usable', 'n_frames_usable', 'n_calibrations',
+                                     'n_reps_sync_changed', 'seconds')}
+        row['n_reps_moved_camera'] = len(s.get('moved_camera_reps') or {})
         for key in ('calib_median_reproj_px', 'camera_height', 'camera_tilt_deg',
                     'camera_roll_deg', 'focal_px_1080'):
             v = s.get(key) or [None] * 3
@@ -648,8 +953,14 @@ def write_tables(out_root):
         for r in s.get('reps', []):
             rr = {'subject': s['subject']}
             rr.update({k: r.get(k) for k in ('stub', 'usable', 'n_frames', 'n_usable_frames',
+                                             'n_usable_frames_frame_rule',
                                              'usable_frac', 'reproj_over_session',
-                                             'bone_dev', 'view_dropped_frac', 'saved')})
+                                             'bone_dev', 'view_dropped_frac',
+                                             'sync_err_align_px', 'sync_err_px', 'saved')})
+            for key in ('sync_lag_align', 'sync_lag'):
+                v = r.get(key)
+                rr[key] = f'{v[0]},{v[1]}' if v else None
+            rr['moved_cameras'] = ','.join(str(c) for c in r.get('moved_cameras') or [])
             loo = r.get('n_usable_frames_loo') or [None] * 3
             for c in range(3):
                 rr[f'n_usable_frames_loo_cam{c + 1}'] = loo[c]
@@ -658,6 +969,21 @@ def write_tables(out_root):
     pd.DataFrame(sess_rows).to_csv(os.path.join(out_root, 'sessions.csv'), index=False, float_format='%.2f')
     pd.DataFrame(rep_rows).to_csv(os.path.join(out_root, 'reps.csv'), index=False, float_format='%.2f')
     return pd.DataFrame(sess_rows), pd.DataFrame(rep_rows)
+
+
+def _process_one(task):
+    """process_session for the worker pool: one session's crash must not end the batch."""
+    subject, args, _ = task
+    try:
+        return process_session(*task)
+    except Exception as e:
+        summary = dict(subject=subject, status='failed', usable=False,
+                       reasons=[f'{type(e).__name__}: {e}'], traceback=traceback.format_exc(), seconds=0)
+        sess_dir = os.path.join(args.out, subject)
+        os.makedirs(sess_dir, exist_ok=True)
+        with open(os.path.join(sess_dir, 'session_summary.json'), 'w') as f:
+            json.dump(jsonable(summary), f, indent=1)
+        return summary
 
 
 def main():
@@ -682,6 +1008,7 @@ def main():
     ap.add_argument('--save-all', action='store_true',
                     help='also save reps that fail the gates (flagged unusable)')
     ap.add_argument('--overwrite', action='store_true')
+    ap.add_argument('--workers', type=int, default=1, help='sessions processed in parallel')
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -691,24 +1018,33 @@ def main():
         want = set(args.subjects.split(','))
         subjects = [s for s in subjects if s in want]
     video_index = build_video_index(args.video_dir)
-    print(f'{len(subjects)} sessions, {len(video_index)} videos indexed -> {args.out}')
+    todo = [s for s in subjects
+            if args.overwrite or not os.path.exists(os.path.join(args.out, s, 'session_summary.json'))]
+    print(f'{len(subjects)} sessions ({len(subjects) - len(todo)} already done), '
+          f'{len(video_index)} videos indexed -> {args.out}', flush=True)
 
-    for i, sub in enumerate(subjects, 1):
-        done = os.path.join(args.out, sub, 'session_summary.json')
-        if os.path.exists(done) and not args.overwrite:
-            print(f'[{i}/{len(subjects)}] {sub}: already done, skipping')
-            continue
-        s = process_session(sub, args, video_index)
+    def report(i, s):
         tag = ('USABLE' if s['usable'] else s['status'].upper() if s['status'] != 'ok'
                else 'NOT USABLE')
         extra = ''
         if s['status'] == 'ok':
             extra = (f"  reps {s['n_reps_usable']}/{s['n_reps']}"
                      f"  frames {s['n_frames_usable']}"
-                     f"  stature {s['stature']:.3f}")
-        print(f"[{i}/{len(subjects)}] {sub}: {tag}{extra}  ({s['seconds']}s)")
+                     f"  stature {s['stature']:.3f}"
+                     f"  sync changed {s['n_reps_sync_changed']}"
+                     f"  moved-camera reps {len(s['moved_camera_reps'])}")
+        print(f"[{i}/{len(todo)}] {s['subject']}: {tag}{extra}  ({s['seconds']}s)", flush=True)
         for why in s['reasons']:
-            print(f'      - {why}')
+            print(f'      - {why}', flush=True)
+
+    if args.workers > 1:
+        from multiprocessing import Pool
+        with Pool(args.workers) as pool:
+            for i, s in enumerate(pool.imap_unordered(_process_one, [(sub, args, video_index) for sub in todo]), 1):
+                report(i, s)
+    else:
+        for i, sub in enumerate(todo, 1):
+            report(i, process_session(sub, args, video_index))
 
     sess, reps = write_tables(args.out)
     ok = sess[sess['usable'] == True]
