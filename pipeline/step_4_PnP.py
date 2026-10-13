@@ -93,7 +93,7 @@ def place(user, action, camera, args):
     n_frames = min(all_kp_2d.shape[0], all_kp_H36M_raw.shape[0])
     if all_kp_2d.shape[0] != all_kp_H36M_raw.shape[0]:
         print(f'  WARNING 2D has {all_kp_2d.shape[0]} rows, mesh pose {all_kp_H36M_raw.shape[0]}; using {n_frames}')
-    w, h, K, L_ext, dist = load_calib(calib_path(user, camera))
+    w, h, K, L_ext, dist = load_calib(calib_path(user, camera, action))
     dist_cv = dist.reshape(1, 5)
     use_joint = parse_joints(args.exclude_joints)
 

@@ -123,9 +123,19 @@ def openpose_check_path(user, action, cam):
     return os.path.join(analysis_dir(user, action), 'diagnostics', 'openpose', f'{cam}_openpose_check.mp4')
 
 
-def calib_path(user, cam):
-    """{cam}.mp4-mocAligned.calib: with the local copy of the data, else on Drive."""
-    for root in (TRIAL_DIR, OUT_DIR):
+def calib_path(user, cam, action=None):
+    """{cam}.mp4-mocAligned.calib: with the local copy of the data, else on Drive.
+
+    With `action`, a calibration in the trial's own folder wins over the subject's: Korea
+    sessions where a camera was moved part-way have one calibration per camera setup, and
+    step_1_korea_2d writes each rep's own beside it."""
+    roots = (TRIAL_DIR, OUT_DIR)
+    if action is not None:
+        for root in roots:
+            p = os.path.join(root, user, action, f'{cam}.mp4-mocAligned.calib')
+            if os.path.exists(p):
+                return p
+    for root in roots:
         p = os.path.join(root, user, f'{cam}.mp4-mocAligned.calib')
         if os.path.exists(p):
             return p

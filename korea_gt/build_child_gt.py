@@ -8,11 +8,16 @@ For every session (subject) in the Korea B set:
      from one motion signal, so try +-sync_window frames per camera and keep the
      offsets whose three views triangulate best (needs align_cameras.py's
      untrimmed tracks; older Aligned/ files are used as they are),
-  3. find reps where one camera disagrees with the other two on nearly every
-     joint -- the camera was moved for those reps -- and drop them,
+  3. set aside the reps the cameras cannot explain: one camera disagreeing with the
+     other two on nearly every joint (moved for those reps), or a sync error far above
+     the session's typical rep -- one such rep bent B199's whole calibration,
   4. recalibrate on the remaining, re-synced reps and refine the sync once more
      (a calibration fitted to mistimed frames is slightly bent: B010's zooms moved
-     1-2% on recalibration, and the second refinement changed 1 rep of 20),
+     1-2% on recalibration, and the second refinement changed 1 rep of 20).  If the
+     result fails the session gates or sets several reps aside, look for camera
+     SETUPS: calibrate each action alone, merge the actions whose cameras explain each
+     other's reps, and calibrate each setup on its own reps (B237: camera 2 moved
+     between actions 3 and 4).  Every rep's file carries its own setup's cameras,
   5. triangulate every frame of every rep with those cameras, dropping a view
      when it disagrees with the other two (catches left/right label swaps),
   6. measure the child's crown-to-sole stature from upright standing frames,
@@ -112,6 +117,14 @@ GATES = dict(
     moved_max_kept_pct=50.0,       # % of its 3-view joints the robust triangulation keeps
     moved_min_others_kept_pct=80.0,
     moved_min_joints=50,
+    # reps the cameras cannot explain (set aside from the calibration, unusable)
+    outlier_k=2.5,                 # sync error above this x the group's typical rep ...
+    outlier_min_px=8.0,            # ... and above this
+    # camera setups (a camera moved or reframed part-way through a session)
+    setup_trigger_reps=2,          # search for setups when this many reps are set aside (or the gates fail)
+    setup_max_fit_px=8.0,          # an action's own calibration must fit its reps this well to count
+    setup_merge_k=2.0,             # actions are one setup if each one's cameras explain the other's reps
+    setup_merge_px=2.0,            #   to within k x its own fit + px
     # triangulation
     conf_thresh=0.5,
     reproj_thresh_px=15.0,         # per view, 1080p pixels
@@ -519,19 +532,19 @@ def sync_error(cams, rep, lag, stride=GATES['sync_stride']):
     return float(np.nanmedian(cc.reprojection_per_view(cams, X, xy, vis)))
 
 
-def refine_sync(cams, rep):
+def refine_sync(cams, rep, window=None, passes=None):
     """Move the rep's offsets to the best-triangulating pair within +-sync_window per camera.
 
     Re-centres and searches again while the best sits on the window's edge (up to
     sync_max_passes).  Returns (error at the starting offsets, error at the chosen ones).
     """
-    W = GATES['sync_window']
+    W = GATES['sync_window'] if window is None else window
     lag = tuple(rep['lag'])
     err0 = sync_error(cams, rep, lag)
     if not np.isfinite(err0):
         return err0, err0
     best_err = err0
-    for _ in range(GATES['sync_max_passes']):
+    for _ in range(GATES['sync_max_passes'] if passes is None else passes):
         errs = {(lag[0] + a, lag[1] + b): sync_error(cams, rep, (lag[0] + a, lag[1] + b))
                 for a in range(-W, W + 1) for b in range(-W, W + 1)}
         errs = {k: e for k, e in errs.items() if np.isfinite(e)}
@@ -570,11 +583,37 @@ def moved_cameras(kept):
     return out
 
 
-def calibrate_and_sync(subject, reps, args):
-    """Calibrate, refine every rep's sync, drop moved-camera reps, recalibrate, refine again.
+def judge_reps(cams, reps, info, key):
+    """Reasons to set each rep aside under these cameras (empty list: keep it).
 
-    Returns (cal, sync_info, moved) where sync_info[stub] records the offsets and errors and
-    moved[stub] lists the camera indices judged moved under the final calibration.
+    A camera kept on few of its joints while the other two agree was moved for that rep; a sync
+    error far above the group's typical rep means the cameras cannot explain it at all (another
+    camera setup, the wrong person, bad tracking).
+    """
+    bad = {}
+    for r in reps:
+        kept = camera_check(cams, r)
+        info[r['stub']]['kept_pct'] = kept
+        bad[r['stub']] = [f'camera {c + 1} moved (kept on {kept[c]:.0f}% of its joints, the others '
+                          f'{np.nanmin(np.delete(kept, c)):.0f}%+)' for c in moved_cameras(kept)]
+    errs = np.array([info[r['stub']].get(key, np.nan) for r in reps], float)
+    typical = np.nanmedian([e for r, e in zip(reps, errs) if not bad[r['stub']]] or [np.nan])
+    if np.isfinite(typical):
+        limit = max(GATES['outlier_k'] * typical, GATES['outlier_min_px'])
+        for r, e in zip(reps, errs):
+            if np.isfinite(e) and e > limit:
+                bad[r['stub']].append(f'cameras cannot explain it: {e:.1f}px vs {typical:.1f}px typical '
+                                      f'(max {limit:.1f}px)')
+    return bad
+
+
+def calibrate_group(subject, reps, args):
+    """One camera setup from `reps`: calibrate, choose people, refine sync, set aside the reps the
+    cameras cannot explain, recalibrate on the rest, refine and judge again.
+
+    B199_GMS_4_2 alone (105 px against ~4) bent its whole session's calibration before reps were
+    set aside.  The dicts in `reps` are updated in place (people, offsets).  Returns
+    (cal, info, bad): info[stub] records offsets and errors, bad[stub] the reasons it was set aside.
     """
     info = {r['stub']: dict(lag_align=r['lag0']) for r in reps}
     cal = calibrate(subject, reps, args)
@@ -586,60 +625,165 @@ def calibrate_and_sync(subject, reps, args):
     for r in reps:
         e0, e1 = refine_sync(cal['cams'], r)
         info[r['stub']].update(err_align=e0, lag_pass1=r['lag'], err_pass1=e1)
-    kept = {r['stub']: camera_check(cal['cams'], r) for r in reps}
-    moved = {s: moved_cameras(k) for s, k in kept.items()}
-    good = [r for r in reps if not moved[r['stub']]]
+    bad = judge_reps(cal['cams'], reps, info, 'err_pass1')
+    good = [r for r in reps if not bad[r['stub']]]
     changed = (sum(info[r['stub']]['lag_pass1'] != r['lag0'] for r in reps)
                + sum(info[r['stub']].get('person_chosen', 0) != 0 for r in reps))
-    if changed or len(good) < len(reps):
+    if (changed or len(good) < len(reps)) and good:
         try:
             cal = calibrate(subject, good, args)
             n_cal = 2
-        except cc.InsufficientData:
+        except (cc.InsufficientData, RuntimeError):
             pass                              # keep the first; recorded below
-        for r in good:
+        for r in reps:
             e0, e1 = refine_sync(cal['cams'], r)
             info[r['stub']].update(lag_pass2=r['lag'], err_pass2=e1)
-        kept = {r['stub']: camera_check(cal['cams'], r) for r in reps}
-        moved = {s: moved_cameras(k) for s, k in kept.items()}
-    for s in info:
-        info[s]['kept_pct'] = kept[s]
-        info[s]['lag_final'] = next(tuple(r['lag']) for r in reps if r['stub'] == s)
+        bad = judge_reps(cal['cams'], reps, info, 'err_pass2')
+    for r in reps:
+        info[r['stub']]['lag_final'] = tuple(r['lag'])
+        info[r['stub']]['err_final'] = info[r['stub']].get('err_pass2', info[r['stub']].get('err_pass1'))
     cal['n_calibrations'] = n_cal
     cal['n_sync_changed'] = sum(info[s]['lag_final'] != info[s]['lag_align'] for s in info)
-    return cal, info, moved
+    return cal, info, bad
 
 
-def process_session(subject, args, video_index):
-    t0 = time.time()
-    sess_dir = os.path.join(args.out, subject)
-    os.makedirs(sess_dir, exist_ok=True)
-    summary = dict(subject=subject, status='failed', usable=False, reasons=[],
-                   gates=GATES, scale_mode=args.scale)
+def setup_quality(cal):
+    """The session gates' geometry measures for one calibration: fit, roll, bone CV, vs noise floor."""
+    rp = cc.reprojection_errors(cal['cams'], cal['prob'], cal['X'])
+    fit = max(rp[c]['median'] for c in range(3))
+    epi = epipolar_floor(cal['obs'])
+    roll = float(np.abs(cc.gravity_frame(cal['cams'], cal['normal'], cal['offset'])['roll_deg']).max())
+    bs = cc.bone_stats(cal['prob'], cal['X'], cal['L'])
+    cv = float(np.median([bs[k]['cv_pct'] for k in LONG_BONES if k in bs]))
+    ratio = fit / epi if np.isfinite(epi) and epi > 0 else np.nan
+    ok = (ratio <= GATES['max_reproj_over_epipolar'] and roll <= GATES['max_abs_roll_deg']
+          and cv <= GATES['max_long_bone_cv_pct'])
+    return dict(fit_px=fit, ratio=ratio, roll=roll, cv=cv, ok=bool(ok))
+
+
+def _action(stub):
+    a = stub.split('_')[2]
+    return (0, int(a)) if a.isdigit() else (1, a)
+
+
+def find_setups(subject, reps, args):
+    """The session's camera setups: one, unless a camera was moved (or reframed) part-way.
+
+    First the whole session as one setup (calibrate_group).  If that fails the session's geometry
+    gates, or sets aside two or more reps, each action is calibrated on its own; actions whose own
+    calibration is poor are dropped; every rep is then tested against every action's cameras, and
+    actions whose cameras explain each other's reps are merged into one setup.  If more than one
+    setup results, each rep goes to the setup that explains it and each setup is calibrated on its
+    own reps.  B237: camera 2 was moved between actions 3 and 4 -- each block fits its own
+    calibration at ~4 px and the other's at ~76 px, and one session-wide calibration fitted
+    neither.  Reps no setup explains stay with the first setup, set aside.
+
+    Returns (setups, search record); setups[0] is the one with the most reps.
+    """
+    base = [dict(r) for r in reps]
+    cal0, info0, bad0 = calibrate_group(subject, base, args)
+    q0 = setup_quality(cal0)
+    single = [dict(cal=cal0, info=info0, bad=bad0, reps=base)]
+    n_bad = sum(bool(b) for b in bad0.values())
+    record = dict(session_fit=q0, n_set_aside=n_bad, tried=False)
+    if q0['ok'] and n_bad < GATES['setup_trigger_reps']:
+        return single, record
+    record['tried'] = True
+    actions = sorted({r['stub'].split('_')[2] for r in reps}, key=lambda a: _action(f'x_x_{a}'))
+    groups = []
+    for a in actions:
+        sel = [dict(r) for r in reps if r['stub'].split('_')[2] == a]
+        try:
+            cal, info, bad = calibrate_group(subject, sel, args)
+        except (cc.InsufficientData, RuntimeError):
+            continue
+        # Judged on fit alone: one action has less floor to fit, so its roll is noisier (B237's
+        # action 1 fitted at 4 px with 12 deg roll); each final setup still faces the roll gate.
+        q = float(np.nanmedian([info[s]['err_final'] for s in info if not bad[s]] or [np.nan]))
+        if np.isfinite(q) and q <= GATES['setup_max_fit_px']:
+            groups.append(dict(action=a, cams=cal['cams'], q=q))
+    record['actions'] = {g['action']: round(g['q'], 2) for g in groups}
+    if len(groups) < 2:
+        return single, record
+
+    # every rep against every action's cameras (offsets re-refined within +-2 frames)
+    E = {}
+    for r in reps:
+        for gi, g in enumerate(groups):
+            trial = dict(r)
+            refine_sync(g['cams'], trial, window=2, passes=1)
+            E[r['stub'], gi] = sync_error(g['cams'], trial, trial['lag'])
+
+    def explains(gi, hi):
+        errs = [E[r['stub'], gi] for r in reps if r['stub'].split('_')[2] == groups[hi]['action']]
+        m = np.nanmedian(errs) if errs else np.nan
+        return np.isfinite(m) and m <= GATES['setup_merge_k'] * groups[gi]['q'] + GATES['setup_merge_px']
+
+    parent = list(range(len(groups)))
+    def root(i):
+        while parent[i] != i:
+            i = parent[i]
+        return i
+    for gi in range(len(groups)):
+        for hi in range(gi + 1, len(groups)):
+            if explains(gi, hi) and explains(hi, gi):
+                parent[root(hi)] = root(gi)
+    members = {}
+    for gi in range(len(groups)):
+        members.setdefault(root(gi), []).append(gi)
+    record['setups_by_action'] = [[groups[g]['action'] for g in m] for m in members.values()]
+    if len(members) < 2:
+        return single, record
+
+    assigned, unassigned = {k: [] for k in members}, []
+    for r in reps:
+        best = None
+        for k, gs in members.items():
+            for gi in gs:
+                e = E[r['stub'], gi]
+                limit = max(GATES['outlier_k'] * groups[gi]['q'], GATES['outlier_min_px'])
+                if np.isfinite(e) and e <= limit and (best is None or e / limit < best[0]):
+                    best = (e / limit, k)
+        (assigned[best[1]] if best else unassigned).append(r)
+
+    setups = []
+    for k in sorted(assigned, key=lambda k: -len(assigned[k])):
+        sel = [dict(r) for r in assigned[k]]
+        if not sel:
+            continue
+        try:
+            cal, info, bad = calibrate_group(subject, sel, args)
+        except (cc.InsufficientData, RuntimeError):
+            unassigned.extend(assigned[k])
+            continue
+        setups.append(dict(cal=cal, info=info, bad=bad, reps=sel,
+                           actions=[groups[g]['action'] for g in members[k]]))
+    if len(setups) < 2:
+        return single, record
+    # reps no setup explains: judged under the first setup's cameras, and set aside
+    first = setups[0]
+    for r in unassigned:
+        rr = dict(r)
+        first['info'][rr['stub']] = dict(lag_align=rr['lag0'])
+        e0, e1 = refine_sync(first['cal']['cams'], rr)
+        first['info'][rr['stub']].update(err_align=e0, err_final=e1, lag_final=tuple(rr['lag']),
+                                         kept_pct=camera_check(first['cal']['cams'], rr))
+        first['bad'][rr['stub']] = ['fits none of the camera setups found']
+        first['reps'].append(rr)
+    record['assigned'] = {i + 1: sorted(r['stub'] for r in s['reps']) for i, s in enumerate(setups)}
+    record['unassigned'] = sorted(r['stub'] for r in unassigned)
+    return setups, record
+
+
+def finish_setup(subject, setup_idx, n_setups, setup, args, video_index, sess_dir, ref):
+    """Triangulate one camera setup's reps, set its unit, check it, judge and save its reps.
+
+    `ref` carries the first setup's bone medians and stature, so a later setup of the same child
+    without upright frames can be put in the same units.  Returns (setup summary, rep records,
+    ref for later setups, this setup's cameras).
+    """
+    cal, sync_info, bad, loaded = setup['cal'], setup['info'], setup['bad'], setup['reps']
     reps_out = []
-
-    def finish():
-        summary['seconds'] = round(time.time() - t0, 1)
-        summary['reps'] = reps_out
-        with open(os.path.join(sess_dir, 'session_summary.json'), 'w') as f:
-            json.dump(jsonable(summary), f, indent=1)
-        return summary
-
-    # ---- 1-4. calibrate, refine sync, drop moved-camera reps, recalibrate --
-    loaded = load_reps(args.data, subject)
-    if not loaded:
-        summary.update(status='skipped', reasons=['no synced reps'])
-        return finish()
-    try:
-        cal, sync_info, moved = calibrate_and_sync(subject, loaded, args)
-    except cc.InsufficientData as e:
-        summary.update(status='skipped', reasons=[str(e).split('.')[0]])
-        return finish()
-    except Exception as e:
-        summary.update(status='failed', reasons=[f'calibration: {type(e).__name__}: {e}'],
-                       traceback=traceback.format_exc())
-        return finish()
-
     cams, prob, obs = cal['cams'], cal['prob'], cal['obs']
     reproj = cc.reprojection_errors(cams, prob, cal['X'])
     calib_med = np.array([reproj[c]['median'] for c in range(3)])
@@ -647,7 +791,7 @@ def process_session(subject, args, video_index):
     bstats = cc.bone_stats(prob, cal['X'], cal['L'])
     long_cv = float(np.median([bstats[k]['cv_pct'] for k in LONG_BONES if k in bstats]))
 
-    # ---- 5. triangulate every frame of every rep -------------------------
+    # ---- triangulate every frame of every rep ----------------------------
     reps = []
     for src in loaded:
         xy, conf, start = rep_span(src)
@@ -666,28 +810,36 @@ def process_session(subject, args, video_index):
             X_loo.append(Xl)
             ok_loo.append(okl)
         reps.append(dict(stub=src['stub'], src=src, start=start, xy=xy, conf=conf, X=X, ok=ok,
-                         used=used, err=err, moved=moved[src['stub']],
+                         used=used, err=err, bad=bad.get(src['stub'], []),
                          X_loo=np.stack(X_loo), ok_loo=np.stack(ok_loo)))
 
-    # ---- 6. stature, then the final unit ---------------------------------
-    # Moved-camera reps are triangulated (their two good cameras still agree) but kept out of
-    # the session's stature and bone medians.
-    calib_reps = [r for r in reps if not r['moved']] or reps
+    # ---- stature, then the final unit ------------------------------------
+    # Set-aside reps are triangulated (their good cameras may still agree) but kept out of the
+    # setup's stature and bone medians.
+    calib_reps = [r for r in reps if not r['bad']] or reps
     floor0 = cc.gravity_frame(cams, cal['normal'], cal['offset'])
     Rw, org = floor0['R_world_to_floor'], floor0['origin']
     allX = np.concatenate([r['X'] for r in calib_reps])
     allok = np.concatenate([r['ok'] for r in calib_reps])
     st = measure_stature((allX - org) @ Rw.T, allok)
 
-    s = 1.0
+    s, scale_from = 1.0, 'none'
     if args.scale == 'stature' and np.isfinite(st['stature']):
-        s = COHORT_STATURE / st['stature']
+        s, scale_from = COHORT_STATURE / st['stature'], 'stature'
+    elif ref is not None and ref.get('sess_bones'):
+        # A second camera setup of the same child with no upright frames of its own: put it in
+        # the first setup's units by matching the long bones.
+        own = {b: float(np.nanmedian(v)) for b, v in bone_lengths(allX, allok).items()}
+        ratios = [ref['sess_bones'][b] / own[b] for b in LONG_BONES
+                  if own.get(b) and np.isfinite(own[b]) and ref['sess_bones'].get(b)]
+        if ratios:
+            s, scale_from = float(np.median(ratios)), 'bones of setup 1'
     cams = scaled(cams, s)
     offset = cal['offset'] * s
     for r in reps:
         r['X'] = r['X'] * s
         r['X_loo'] = r['X_loo'] * s
-    stature = st['stature'] * s
+    stature = ref['stature'] if scale_from == 'bones of setup 1' else st['stature'] * s
     floor = cc.gravity_frame(cams, cal['normal'], offset)
     Rw, org = floor['R_world_to_floor'], floor['origin']
 
@@ -696,7 +848,7 @@ def process_session(subject, args, video_index):
     sess_bones = {k: float(np.nanmedian(v))
                   for k, v in bone_lengths(allX, allok).items()}
 
-    # ---- 7. session gates ------------------------------------------------
+    # ---- setup gates (the session's gates, per camera setup) ---------------
     ratio = float(calib_med.max() / epi) if np.isfinite(epi) and epi > 0 else float('nan')
     roll = float(np.abs(floor['roll_deg']).max())
     checks = [
@@ -709,13 +861,13 @@ def process_session(subject, args, video_index):
          f'long-bone CV {long_cv:.1f}% (max {GATES["max_long_bone_cv_pct"]})'),
         (cal['floor_inlier_frac'] >= GATES['min_floor_inlier_frac'],
          f'floor inliers {cal["floor_inlier_frac"]:.2f} (min {GATES["min_floor_inlier_frac"]})'),
-        (np.isfinite(st['stature']),
+        (np.isfinite(st['stature']) or scale_from == 'bones of setup 1',
          f'stature unmeasurable: {st["n_upright"]} upright frames '
          f'(need {GATES["min_upright_frames"]})'),
     ]
     session_ok = all(p for p, _ in checks)
-    summary.update(
-        status='ok', usable=session_ok,
+    ssum = dict(
+        setup=setup_idx + 1, status='ok', usable=session_ok,
         reasons=[msg for p, msg in checks if not p],
         n_calib_frames=int(obs.xy.shape[0]), calib_rule=cal['rule'],
         calib_median_reproj_px=calib_med, epipolar_floor_px=epi,
@@ -728,27 +880,18 @@ def process_session(subject, args, video_index):
         stature=stature, stature_measure=st, unit_scale=s,
         session_bone_median=sess_bones,
         n_calibrations=cal['n_calibrations'], n_reps_sync_changed=cal['n_sync_changed'],
-        moved_camera_reps={k: [c + 1 for c in v] for k, v in moved.items() if v})
+        set_aside_reps={r['stub']: r['bad'] for r in reps if r['bad']},
+        n_reps_in_setup=len(reps), scale_from=scale_from)
 
-    # The session's cameras, whatever the verdict: failed sessions can then be inspected
-    # without recalibrating.  Offsets are per rep (camera 1 row i+lag1c == camera c row i).
-    np.savez(os.path.join(sess_dir, 'session_cameras.npz'),
-             R_world_to_cam=cams.R, t_world_to_cam=cams.t, f=cams.f, cx=cams.cx, cy=cams.cy,
-             R_world_to_floor=Rw, floor_origin=org, unit_scale=s, usable=session_ok,
-             stubs=np.array([r['stub'] for r in reps]),
-             lag_align=np.array([sync_info[r['stub']]['lag_align'] for r in reps]),
-             lag_final=np.array([sync_info[r['stub']]['lag_final'] for r in reps]),
-             kept_pct=np.array([sync_info[r['stub']]['kept_pct'] for r in reps]))
+    # This setup's cameras, whatever the verdict (process_session saves them for every setup).
+    cam_rec = dict(R_world_to_cam=cams.R, t_world_to_cam=cams.t, f=cams.f, cx=cams.cx, cy=cams.cy,
+                   R_world_to_floor=Rw, floor_origin=org, unit_scale=s, usable=session_ok,
+                   stubs=np.array([r['stub'] for r in reps]),
+                   lag_align=np.array([sync_info[r['stub']]['lag_align'] for r in reps]),
+                   lag_final=np.array([sync_info[r['stub']]['lag_final'] for r in reps]),
+                   kept_pct=np.array([sync_info[r['stub']]['kept_pct'] for r in reps]))
 
-    if np.isfinite(stature):
-        with open(os.path.join(sess_dir, 'user_meta.json'), 'w') as f:
-            json.dump({'stature_m': round(float(stature), 4),
-                       'note': 'crown-to-sole, measured from the triangulated '
-                               'reconstruction, in the same units as the saved '
-                               'skeletons (see session_summary.json unit_scale)'},
-                      f, indent=1)
-
-    # ---- 8. per rep: gates, camera frames, save ---------------------------
+    # ---- per rep: gates, camera frames, save -----------------------------
     R_wc = cams.R                                           # (3,3,3)
     K1080 = np.stack([[[cams.f[c], 0, cams.cx[c]], [0, cams.f[c], cams.cy[c]], [0, 0, 1.0]]
                       for c in range(3)])
@@ -813,10 +956,8 @@ def process_session(subject, args, video_index):
         kept = si['kept_pct']
 
         rchecks = [
-            (session_ok, 'session not usable'),
-            (not r['moved'],
-             '; '.join(f'camera {c + 1} moved (kept on {kept[c]:.0f}% of its joints, the others '
-                       f'{np.nanmin(np.delete(kept, c)):.0f}%+)' for c in r['moved'])),
+            (session_ok, 'session not usable' if n_setups == 1 else f'camera setup {setup_idx + 1} not usable'),
+            (not r['bad'], '; '.join(r['bad'])),
             (n_ok >= GATES['min_usable_frames'],
              f'{n_ok} usable frames (min {GATES["min_usable_frames"]})'),
             (n_ok / max(T, 1) >= GATES['min_usable_frac'],
@@ -837,7 +978,7 @@ def process_session(subject, args, video_index):
                    sync_lag_align=si['lag_align'], sync_lag=si['lag_final'],
                    sync_err_align_px=si.get('err_align'),
                    sync_err_px=si.get('err_pass2', si.get('err_pass1')),
-                   camera_kept_pct=kept, moved_cameras=[c + 1 for c in r['moved']],
+                   camera_kept_pct=kept, set_aside=r['bad'], setup=setup_idx + 1,
                    person={k: si[k] for k in ('person_candidates', 'person_chosen', 'person_combo',
                                               'person_err_px', 'person_size') if k in si} or None,
                    median_reproj_px=rep_med, reproj_over_session=rep_ratio,
@@ -862,7 +1003,7 @@ def process_session(subject, args, video_index):
 
             np.savez_compressed(
                 os.path.join(sess_dir, r['stub'] + '.npz'),
-                subject=subject, stub=r['stub'], usable=rep_ok,
+                subject=subject, stub=r['stub'], usable=rep_ok, setup=np.int64(setup_idx + 1),
                 cameras=np.array([1, 2, 3]),
                 fps=np.float64(args.fps if args.fps else np.nan),   # capture rate, if supplied
                 # Layout: every per-camera array leads with the camera axis (C,T,...).
@@ -920,6 +1061,77 @@ def process_session(subject, args, video_index):
             rec['saved'] = True
         reps_out.append(rec)
 
+    return ssum, reps_out, dict(sess_bones=sess_bones, stature=stature), cam_rec
+
+
+def process_session(subject, args, video_index):
+    t0 = time.time()
+    sess_dir = os.path.join(args.out, subject)
+    os.makedirs(sess_dir, exist_ok=True)
+    summary = dict(subject=subject, status='failed', usable=False, reasons=[],
+                   gates=GATES, scale_mode=args.scale)
+    reps_out = []
+
+    def finish():
+        summary['seconds'] = round(time.time() - t0, 1)
+        summary['reps'] = reps_out
+        with open(os.path.join(sess_dir, 'session_summary.json'), 'w') as f:
+            json.dump(jsonable(summary), f, indent=1)
+        return summary
+
+    # ---- 1-4. camera setups: calibrate, refine sync, set reps aside, recalibrate
+    loaded = load_reps(args.data, subject)
+    if not loaded:
+        summary.update(status='skipped', reasons=['no synced reps'])
+        return finish()
+    try:
+        setups, search = find_setups(subject, loaded, args)
+    except cc.InsufficientData as e:
+        summary.update(status='skipped', reasons=[str(e).split('.')[0]])
+        return finish()
+    except RuntimeError as e:
+        summary.update(status='skipped', reasons=[f'calibration: {e}'])
+        return finish()
+    except Exception as e:
+        summary.update(status='failed', reasons=[f'calibration: {type(e).__name__}: {e}'],
+                       traceback=traceback.format_exc())
+        return finish()
+
+    # ---- 5-8. per setup: triangulate, unit, gates, reps -----------------------
+    sums, cam_recs, ref = [], [], None
+    for i, st in enumerate(setups):
+        ssum, recs, ref_i, cam_rec = finish_setup(subject, i, len(setups), st, args, video_index, sess_dir, ref)
+        if i == 0:
+            ref = ref_i
+        sums.append(ssum)
+        cam_recs.append(cam_rec)
+        reps_out.extend(recs)
+    reps_out.sort(key=lambda r: _action(r['stub']) + (r['stub'],))
+
+    summary.update({k: v for k, v in sums[0].items() if k != 'setup'})
+    summary['usable'] = any(s['usable'] for s in sums)
+    summary['n_setups'] = len(setups)
+    summary['setup_search'] = search
+    if len(setups) > 1:
+        summary['reasons'] = [f"setup {s['setup']}: {m}" for s in sums for m in s['reasons']]
+        summary['setups'] = sums
+    summary['set_aside_reps'] = {k: v for s in sums for k, v in s['set_aside_reps'].items()}
+
+    # The session's cameras, every setup, whatever the verdict: failed sessions can then be
+    # inspected without recalibrating.  Offsets are per rep (camera 1 row i+lag1c == camera c row i).
+    np.savez(os.path.join(sess_dir, 'session_cameras.npz'), n_setups=len(setups),
+             **{f'{k}_s{i + 1}': v for i, rec in enumerate(cam_recs) for k, v in rec.items()},
+             **({k: v for k, v in cam_recs[0].items()}))
+
+    stature = sums[0]['stature']
+    if np.isfinite(stature):
+        with open(os.path.join(sess_dir, 'user_meta.json'), 'w') as f:
+            json.dump({'stature_m': round(float(stature), 4),
+                       'note': 'crown-to-sole, measured from the triangulated '
+                               'reconstruction, in the same units as the saved '
+                               'skeletons (see session_summary.json unit_scale)'},
+                      f, indent=1)
+
     summary['n_reps'] = len(reps_out)
     summary['n_reps_usable'] = sum(r['usable'] for r in reps_out)
     summary['n_frames_usable'] = sum(r['n_usable_frames'] for r in reps_out if r['usable'])
@@ -941,7 +1153,8 @@ def write_tables(out_root):
                                      'stature', 'unit_scale', 'n_reps',
                                      'n_reps_usable', 'n_frames_usable', 'n_calibrations',
                                      'n_reps_sync_changed', 'seconds')}
-        row['n_reps_moved_camera'] = len(s.get('moved_camera_reps') or {})
+        row['n_reps_set_aside'] = len(s.get('set_aside_reps') or {})
+        row['n_setups'] = s.get('n_setups')
         for key in ('calib_median_reproj_px', 'camera_height', 'camera_tilt_deg',
                     'camera_roll_deg', 'focal_px_1080'):
             v = s.get(key) or [None] * 3
@@ -960,7 +1173,8 @@ def write_tables(out_root):
             for key in ('sync_lag_align', 'sync_lag'):
                 v = r.get(key)
                 rr[key] = f'{v[0]},{v[1]}' if v else None
-            rr['moved_cameras'] = ','.join(str(c) for c in r.get('moved_cameras') or [])
+            rr['setup'] = r.get('setup')
+            rr['set_aside'] = '; '.join(r.get('set_aside') or [])
             loo = r.get('n_usable_frames_loo') or [None] * 3
             for c in range(3):
                 rr[f'n_usable_frames_loo_cam{c + 1}'] = loo[c]
@@ -1032,7 +1246,7 @@ def main():
                      f"  frames {s['n_frames_usable']}"
                      f"  stature {s['stature']:.3f}"
                      f"  sync changed {s['n_reps_sync_changed']}"
-                     f"  moved-camera reps {len(s['moved_camera_reps'])}")
+                     f"  setups {s.get('n_setups', 1)}  set aside {len(s.get('set_aside_reps') or {})}")
         print(f"[{i}/{len(todo)}] {s['subject']}: {tag}{extra}  ({s['seconds']}s)", flush=True)
         for why in s['reasons']:
             print(f'      - {why}', flush=True)

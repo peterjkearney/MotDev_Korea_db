@@ -119,7 +119,7 @@ def run_camera(user, action, detector, cam, cid, cfg, shapes, device, log):
     rot0 = np.load(betas_path(user, action, detector, cam), allow_pickle=True)['rotmats'].astype(np.float64)
     T = min(rot0.shape[0], kp2d.shape[0])
     rot0, kp2d = rot0[:T], kp2d[:T]
-    w, h, K, L_ext, dist = load_calib(calib_path(user, cam))
+    w, h, K, L_ext, dist = load_calib(calib_path(user, cam, action))
     K, L_ext = K.astype(np.float64), L_ext.astype(np.float64)
     dist_cv = np.asarray(dist, dtype=np.float64).reshape(1, 5)
     shape, scale, mesh_h, shape_desc = shapes.get(cfg['shape'], user, action, detector, cam)

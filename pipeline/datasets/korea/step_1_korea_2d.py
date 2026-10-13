@@ -6,7 +6,8 @@ GT3D/ and writes, for every usable rep, the trial layout the rest of the
 pipeline expects -- so steps 2a, 2b, 3, 4, 5, 6 and 8 run on children unchanged:
 
     {OUT_DIR}/{subject}/user_meta.json                                       stature (step_3)
-    {OUT_DIR}/{subject}/{cam}.mp4-mocAligned.calib                           K, L_ext (step_4, step_8)
+    {OUT_DIR}/{subject}/{rep}/{cam}.mp4-mocAligned.calib                     K, L_ext of the rep's own camera setup
+    {OUT_DIR}/{subject}/{cam}.mp4-mocAligned.calib                           the first rep's, as a fallback
     {OUT_DIR}/{subject}/{rep}/Analysis/keypoints/openpose/{cam}_2d.npz       OpenPose 2D (step_2a)
     {OUT_DIR}/{subject}/{rep}/Analysis/H36M/openpose_tri_h36m.npz            target, mocap_h36m.npz layout
 
@@ -16,7 +17,9 @@ before running this and every later step, e.g.
     %env BIOCV_OUT=/content/drive/MyDrive/MotorDevelopment/Data/Korea
 There is no local copy of anything for this dataset (no videos, no mocap), so
 the calibs and stature live in OUT_DIR too, where config.calib_path and
-config.stature_path look second.  Reps already laid out are skipped (--force).
+config.stature_path look second.  A session whose camera was moved part-way has one
+calibration per camera setup (build_child_gt.py), so every rep gets its own calib and
+config.calib_path(user, cam, action) prefers it.  Reps already laid out are skipped (--force).
 
 Frames.  BioCV's "lab" frame is the mocap frame, Z up.  For Korea the lab
 frame is the fitted floor frame: Z up, origin on the floor under camera 1.
@@ -152,16 +155,23 @@ def main():
                     json.dump({'stature_m': round(float(d['stature_m']), 4),
                                'source': 'crown-to-sole measured from the triangulated '
                                          'reconstruction (build_child_gt.py)'}, f, indent=1)
-                for c, cam in enumerate(cams):
-                    # lab (floor) -> camera: X_cam = R_c (Rw^T X_floor + org) + t_c
-                    R_lc = R_wc[c] @ Rw.T
-                    t_lc = (R_wc[c] @ org + t_wc[c]) * 1000.0
-                    L = np.eye(4)
-                    L[:3, :3], L[:3, 3] = R_lc, t_lc
-                    save_calib(os.path.join(udir, f'{cam}.mp4-mocAligned.calib'),
-                               w, h, d['K_1080'][c], L, d['dist'][c])
                 wrote_session = True
                 n_sub += 1
+
+            # Cameras: every rep gets its own (config.calib_path prefers it), since a session
+            # whose camera was moved has one calibration per camera setup; the subject's copy
+            # (step_4/4b's fallback, older layouts) is the first rep's.
+            rep_dir = os.path.dirname(os.path.dirname(os.path.dirname(_tri_path(sub, stub))))   # {OUT_DIR}/{sub}/{stub}
+            for c, cam in enumerate(cams):
+                # lab (floor) -> camera: X_cam = R_c (Rw^T X_floor + org) + t_c
+                R_lc = R_wc[c] @ Rw.T
+                t_lc = (R_wc[c] @ org + t_wc[c]) * 1000.0
+                L = np.eye(4)
+                L[:3, :3], L[:3, 3] = R_lc, t_lc
+                os.makedirs(rep_dir, exist_ok=True)
+                save_calib(os.path.join(rep_dir, f'{cam}.mp4-mocAligned.calib'), w, h, d['K_1080'][c], L, d['dist'][c])
+                if not os.path.exists(os.path.join(udir, f'{cam}.mp4-mocAligned.calib')):
+                    save_calib(os.path.join(udir, f'{cam}.mp4-mocAligned.calib'), w, h, d['K_1080'][c], L, d['dist'][c])
 
             # 2D input per camera, in step_1's file layout
             for c, cam in enumerate(cams):
