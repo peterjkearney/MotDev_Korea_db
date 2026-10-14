@@ -5,7 +5,8 @@ step_4 is one recipe: MotionBERT's shape, rescaled to the stature, placed rigidl
 frame.  This runs the configurations in formulations.py, each a different combination of
 
     shape        MotionBERT's betas | adult SMPL fitted to bone lengths | kid blend | cohort kid (each fitted
-                 with or without the hip/shoulder widths, _nw)
+                 with or without the hip/shoulder widths, _nw, or on SMPL-24 joints, _s24, + girth prior, _s24g)
+    joints       the model's H36M-17 joints: the H36M regressor, or rebuilt from SMPL's 24 joints
     placement    rigid PnP | frozen ray rotation with the translation solved | free rotation
     body         MotionBERT's joint angles kept, or refined against the 2D (SMPLify-style,
                  L-BFGS over the whole trial: robust reprojection + pull toward MotionBERT +
@@ -82,7 +83,7 @@ class Shapes:
             b = np.load(final_betas_path(user, action, detector, cam), allow_pickle=True)['betas'].ravel()[:10].astype(np.float64)
             h = mesh_height_m(self.lin[10], b)
             return b, self.stature(user) / h, h, f"MotionBERT betas, rescaled x{self.stature(user) / h:.3f} to {self.stature(user):.2f} m"
-        if name in ('adult', 'kid', 'adult_nw', 'kid_nw'):
+        if name in ('adult', 'kid', 'adult_nw', 'kid_nw', 'adult_s24', 'kid_s24', 'adult_s24g', 'kid_s24g'):
             p = shapes_path(user)
             if not os.path.exists(p):
                 raise FileNotFoundError(f'{p} -- run step_2c_fit_shape.py first')
@@ -90,7 +91,7 @@ class Shapes:
             if name not in z.files:
                 raise FileNotFoundError(f'{p} has no {name!r} -- rerun step_2c_fit_shape.py --force')
             b = z[name].astype(np.float64)
-        elif name in ('cohort_kid', 'cohort_kid_nw'):
+        elif name in ('cohort_kid', 'cohort_kid_nw', 'cohort_kid_s24', 'cohort_kid_s24g'):
             p = cohort_shapes_path()
             if not os.path.exists(p):
                 raise FileNotFoundError(f'{p} -- run step_2c_fit_shape.py --cohort first')
@@ -135,13 +136,13 @@ def run_camera(user, action, detector, cam, cid, cfg, shapes, device, log):
     dist_cv = np.asarray(dist, dtype=np.float64).reshape(1, 5)
     shape, scale, mesh_h, shape_desc = shapes.get(cfg['shape'], user, action, detector, cam)
     use_joint = parse_joints(cfg['exclude_2d'])
-    log(f'  {cam}: {shape_desc}; {T} frames at {fps:.0f} fps')
+    log(f'  {cam}: {shape_desc}; {cfg["joints"]} joints; {T} frames at {fps:.0f} fps')
 
-    smpl = MiniSMPL(shape, device)
+    smpl = MiniSMPL(shape, device, joints=cfg['joints'])
     f64 = dict(dtype=torch.float64, device=device)
     moments = torch.tensor(body_points(shape), **f64)            # row 0 COM, rows 1-8 sole points (SOLE)
     # floor_contact_m 'mesh': this body's own ankle height above its sole, at the placement scale
-    contact_m = (ankle_height_m(shape) * scale if cfg['floor_contact_m'] == 'mesh' else float(cfg['floor_contact_m']))
+    contact_m = (ankle_height_m(shape, cfg['joints']) * scale if cfg['floor_contact_m'] == 'mesh' else float(cfg['floor_contact_m']))
     if cfg['w_floor_contact'] > 0:
         log(f'  {cam}: grounded ankle held at {1000 * contact_m:.0f} mm above the floor ({cfg["floor_contact_m"]})')
     rot0_t = torch.tensor(rot0, **f64)

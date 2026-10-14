@@ -96,21 +96,53 @@ def load_h36m_regressor():
     return np.load(os.path.join(MB_MESH, 'J_regressor_h36m_correct.npy')).astype(np.float64)
 
 
+# H36M-17 joints from SMPL's own 24-joint regressor (the SMPLify-X convention for OpenPose's body joints):
+# limb joints at SMPL's joint centres, Hip / Thorax / Spine built as the targets build them (midpoints),
+# Nose / Head kept from the H36M regressor (SMPL-24 has no counterpart; both are out of the 2D term and the
+# scoring).  The H36M regressor's hips sit 80 mm lateral and 123 mm above SMPL's on the mean adult (40 / 53 mm
+# at kid weight 0.75) -- up on the pelvis, so its thigh shortens ~30% as the hip flexes to 120 deg, where
+# SMPL-24's shortens 2-4%.
+SMPL24_FOR_H36M = {'RHip': 'R_Hip', 'RKnee': 'R_Knee', 'RAnkle': 'R_Ankle', 'LHip': 'L_Hip', 'LKnee': 'L_Knee',
+                   'LAnkle': 'L_Ankle', 'LShoulder': 'L_Shoulder', 'LElbow': 'L_Elbow', 'LWrist': 'L_Wrist',
+                   'RShoulder': 'R_Shoulder', 'RElbow': 'R_Elbow', 'RWrist': 'R_Wrist'}
+JOINTS = ('h36m', 'smpl24')
+
+
+def joint_regressor(joints='h36m'):
+    """(17,6890) vertex regressor for the H36M-17 layout: 'h36m' the mesh checkpoint's H36M regressor,
+    'smpl24' the layout rebuilt from SMPL's J_regressor (SMPL24_FOR_H36M)."""
+    Jh = load_h36m_regressor()
+    if joints == 'h36m':
+        return Jh
+    if joints != 'smpl24':
+        raise ValueError(f'unknown joints {joints!r} (one of {JOINTS})')
+    Jr = _load_pkl()['J_regressor']
+    Jr = Jr.toarray() if sp.issparse(Jr) else np.asarray(Jr, dtype=np.float64)
+    out = Jh.copy()                                                  # Nose, Head stay H36M's
+    for h, s in SMPL24_FOR_H36M.items():
+        out[J[h]] = Jr[SMPL24.index(s)]
+    out[J['Hip']] = 0.5 * (out[J['RHip']] + out[J['LHip']])
+    out[J['Thorax']] = 0.5 * (out[J['RShoulder']] + out[J['LShoulder']])
+    out[J['Spine']] = 0.5 * (out[J['Hip']] + out[J['Thorax']])
+    return out
+
+
 def kid_shapedir(v_template):
     k = np.load(kid_template_path()).astype(np.float64)
     return (k - k.mean(0)) - v_template
 
 
 # ----------------------------------------------------------------------------- linear model (numpy)
-def load_linear(n_betas=10, kid=False):
-    """v_t (6890,3), S (6890,3,n), J0 (17,3), A (17,3,n): rest-pose vertices / H36M joints linear in shape."""
+def load_linear(n_betas=10, kid=False, joints='h36m'):
+    """v_t (6890,3), S (6890,3,n), J0 (17,3), A (17,3,n): rest-pose vertices / H36M-17 joints linear in shape
+    (joints: see joint_regressor)."""
     m = _load_pkl()
     v_t = np.asarray(m['v_template'], dtype=np.float64)
     S = np.asarray(m['shapedirs'], dtype=np.float64)[:, :, :n_betas]
     if kid:
         S = np.concatenate([S, kid_shapedir(v_t)[:, :, None]], axis=2)
-    Jr = load_h36m_regressor()
-    return dict(v_t=v_t, S=S, J0=Jr @ v_t, A=np.einsum('jv,vck->jck', Jr, S), kid=kid, n_betas=n_betas)
+    Jr = joint_regressor(joints)
+    return dict(v_t=v_t, S=S, J0=Jr @ v_t, A=np.einsum('jv,vck->jck', Jr, S), kid=kid, n_betas=n_betas, joints=joints)
 
 
 def midpoint_centres(lin):
@@ -148,11 +180,47 @@ def data_seg_lengths(kps3d_mm, segs=SEGMENTS):
     return np.array(med), np.array(iqr), np.array(n)
 
 
-def fit_betas(lin, target_mm, segs=SEGMENTS, lam=1.0, sigma_mm=10.0, lam_rest=None):
+# ----------------------------------------------------------------------------- girth
+# Trunk girths at fixed fractions of the way from the Hip to the Thorax joint (rest pose, y up).
+GIRTH_LEVELS = {'hip': 0.0, 'waist': 0.5, 'chest': 0.8}
+
+
+def girth_rings(lin, shape_ref, slab_m=0.008):
+    """{name: vertex indices in ring order} for each GIRTH_LEVELS slice of the reference body: the convex
+    outline (x-z) of the vertices within slab_m of the level, trunk only (T-pose arms and the thighs' far
+    sides cut by a half-width from the shoulders).  Chosen once, so girths_mm is smooth in the shape."""
+    from scipy.spatial import ConvexHull
+    v = lin['v_t'] + lin['S'] @ np.asarray(shape_ref, dtype=np.float64)
+    j = lin['J0'] + lin['A'] @ np.asarray(shape_ref, dtype=np.float64)
+    yh, yt, xc = j[J['Hip'], 1], j[J['Thorax'], 1], j[J['Hip'], 0]
+    half = 0.8 * abs(j[J['RShoulder'], 0] - j[J['LShoulder'], 0])
+    rings = {}
+    for name, f in GIRTH_LEVELS.items():
+        idx = np.where((np.abs(v[:, 1] - (yh + f * (yt - yh))) < slab_m) & (np.abs(v[:, 0] - xc) < half))[0]
+        rings[name] = idx[ConvexHull(v[idx][:, [0, 2]]).vertices]
+    return rings
+
+
+def girths_mm(lin, shape, rings):
+    """{name: perimeter (mm) of that ring in the x-z plane} for this shape."""
+    shape = np.asarray(shape, dtype=np.float64)
+    out = {}
+    for name, idx in rings.items():
+        p = (lin['v_t'][idx] + lin['S'][idx] @ shape)[:, [0, 2]]
+        out[name] = 1000.0 * float(np.linalg.norm(p - np.roll(p, -1, axis=0), axis=1).sum())
+    return out
+
+
+def fit_betas(lin, target_mm, segs=SEGMENTS, lam=1.0, sigma_mm=10.0, lam_rest=None, girth=None, sigma_girth_mm=10.0):
     """Damped least squares: (fitted - target)/sigma per segment plus sqrt(lam)*beta as a ridge
     toward the mean shape (lam_rest, when given, replaces lam for betas 1-9: beta 0 is mostly size,
     the rest proportions and girth).  With a kid model the last parameter is the kid weight, bounded
-    [0,1], unregularised, started at 0.5.  Returns (shape, rms residual mm)."""
+    [0,1], unregularised, started at 0.5.
+
+    girth (girth_rings output): a girth prior -- each ring's perimeter is held to that of the same body
+    with betas 1-9 at zero (size and kid weight still scale girth), (difference)/sigma_girth_mm per ring.
+    Bone lengths carry no girth information, so this keeps girth at the mean for the size while betas
+    1-9 stay free (under a light lam_rest) to fit proportions.  Returns (shape, rms residual mm)."""
     from scipy.optimize import least_squares
     ok = np.isfinite(target_mm)
     segs_ok = [s for s, k in zip(segs, ok) if k]
@@ -163,8 +231,17 @@ def fit_betas(lin, target_mm, segs=SEGMENTS, lam=1.0, sigma_mm=10.0, lam_rest=No
     if lam_rest is not None:
         w[1:] = np.sqrt(lam_rest)
 
+    def girth_resid(x):
+        x0 = x.copy()
+        x0[1:n_reg] = 0.0
+        g, g0 = girths_mm(lin, x, girth), girths_mm(lin, x0, girth)
+        return np.array([(g[k] - g0[k]) / sigma_girth_mm for k in girth])
+
     def resid(x):
-        return np.concatenate([(seg_lengths_mm(lin, x, segs_ok) - tgt) / sigma_mm, w * x[:n_reg]])
+        r = [(seg_lengths_mm(lin, x, segs_ok) - tgt) / sigma_mm, w * x[:n_reg]]
+        if girth is not None:
+            r.append(girth_resid(x))
+        return np.concatenate(r)
 
     if lin['kid']:
         x0 = np.zeros(n)
@@ -182,14 +259,14 @@ def fit_betas(lin, target_mm, segs=SEGMENTS, lam=1.0, sigma_mm=10.0, lam_rest=No
 class MiniSMPL:
     """SMPL linear blend skinning at the vertices J_regressor / J_regressor_h36m read.
     shape: 10 betas, or 11 with the kid weight last.  full=True skins all 6890 vertices
-    (for rendering: vertices() and faces)."""
+    (for rendering: vertices() and faces).  joints: which regressor the H36M-17 output uses (joint_regressor)."""
 
-    def __init__(self, shape, device='cpu', full=False):
+    def __init__(self, shape, device='cpu', full=False, joints='h36m'):
         import torch
         m = _load_pkl()
         Jr = m['J_regressor']
         Jr = Jr.toarray() if sp.issparse(Jr) else np.asarray(Jr)
-        Jh = load_h36m_regressor()
+        Jh = joint_regressor(joints)
         idx = (np.arange(Jr.shape[1]) if full else
                np.where((np.abs(Jr).sum(0) > 0) | (np.abs(Jh).sum(0) > 0))[0])
         self.faces = np.asarray(m['f'], dtype=np.int64) if full else None
@@ -252,11 +329,11 @@ class MiniSMPL:
         return A
 
 
-def ankle_height_m(shape):
-    """Rest-pose height of the H36M ankle joints above the sole (the lowest vertex), metres,
+def ankle_height_m(shape, joints='h36m'):
+    """Rest-pose height of the H36M-17 ankle joints above the sole (the lowest vertex), metres,
     mean of left and right: where a grounded ankle sits above a barefoot floor for this body."""
     import torch
-    smpl = MiniSMPL(shape, full=True)
+    smpl = MiniSMPL(shape, full=True, joints=joints)
     with torch.no_grad():
         v = smpl.vertices(torch.eye(3, dtype=torch.float64).expand(1, 24, 3, 3))[0]
         Jh = smpl.Jh @ v

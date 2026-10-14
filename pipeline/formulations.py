@@ -8,6 +8,12 @@ A configuration is one way of turning MotionBERT's pass-1 rotations into a place
                  'cohort_kid'  the cohort-median kid shape (step_2c --cohort): the deployable version
                  'adult_nw', 'kid_nw', 'cohort_kid_nw'   the same fitted without the hip and shoulder widths
                                (girth from the shape prior; see step_2c)
+                 'adult_s24', 'kid_s24', 'cohort_kid_s24'   the _nw fit on SMPL-24 joints (run with joints='smpl24')
+                 'adult_s24g', 'kid_s24g', 'cohort_kid_s24g'  the same with a girth prior in place of the
+                               betas 1-9 ridge (proportions free, girth at the mean for the size)
+    joints       'h36m'        the model's H36M-17 joints from MotionBERT's H36M regressor (hips up on the pelvis)
+                 'smpl24'      rebuilt from SMPL's own 24 joints (smpl_lite.joint_regressor): used for PnP, the 2D
+                               term, the floor contact and the scored output
     placement    'pnp'         step_4's rigid PnP per frame + RTS root smoothing; no refinement
                  'ray_const'   per-frame ray rotation (MotionBERT orientation + off-axis correction)
                                + one constant per trial from PnP; translation solved
@@ -42,7 +48,7 @@ FLOOR = dict(w_foot=3000.0, w_floor=3000.0)
 CONTACT = dict(w_floor_contact=3000.0, floor_contact_m=0.025)
 BALANCE = dict(w_com=3000.0, com_margin_m=0.03, com_support='any')
 
-DEFAULTS = dict(shape='motionbert', placement='ray_const', body=True, exclude_2d='',
+DEFAULTS = dict(shape='motionbert', joints='h36m', placement='ray_const', body=True, exclude_2d='',
                 w_foot=0.0, w_floor=0.0, w_floor_contact=0.0, floor_contact_m=0.025,
                 w_com=0.0, com_margin_m=0.03, com_support='any',
                 w_pull=30.0, w_smooth=30.0, w_trans_acc=1e4, sigma_px=5.0, huber=20.0,
@@ -81,6 +87,10 @@ CHAIN = {
     # shape without the width segments
     'C11': dict(shape='kid_nw', placement='ray_const', body=True, exclude_2d=HEAD, **FLOOR, **CONTACT,
                 note='child recipe, kid shape fitted without hip/shoulder widths'),
+    'C12': dict(shape='kid_s24', joints='smpl24', placement='ray_const', body=True, exclude_2d=HEAD, **FLOOR, **CONTACT,
+                note='C11 on SMPL-24 joints: hips at the femoral head (fit, 2D term, output)'),
+    'C13': dict(shape='kid_s24g', joints='smpl24', placement='ray_const', body=True, exclude_2d=HEAD, **FLOOR, **CONTACT,
+                note='C12 with a girth prior instead of the betas 1-9 ridge'),
 }
 
 # one component removed from the child recipe at a time
