@@ -66,6 +66,14 @@ SEGMENTS = [('Hip', 'RHip'), ('RHip', 'RKnee'), ('RKnee', 'RAnkle'),
             ('Thorax', 'RShoulder'), ('RShoulder', 'RElbow'), ('RElbow', 'RWrist'),
             ('RHip', 'LHip'), ('RShoulder', 'LShoulder')]
 
+# The hip and shoulder widths measure the joint DEFINITION as much as the body: on BioCV P03 the triangulated
+# OpenPose hips are 49 mm wider than mocap's hip joint centres, shoulders 58 mm, and SMPL's regressed H36M hips
+# wider than both (294 mm on the mean adult).  They are also the only terms that constrain girth, so fitting them
+# sets the torso's girth from the definition gap.  The width-free set leaves girth to the shape prior.
+WIDTH_SEGMENTS = [('Hip', 'RHip'), ('Hip', 'LHip'), ('RHip', 'LHip'),
+                  ('Thorax', 'LShoulder'), ('Thorax', 'RShoulder'), ('RShoulder', 'LShoulder')]
+SEGMENTS_NO_WIDTH = [s for s in SEGMENTS if s not in WIDTH_SEGMENTS]
+
 
 def _load_pkl():
     p = os.path.join(MB_MESH, 'SMPL_NEUTRAL.pkl')
@@ -105,6 +113,18 @@ def load_linear(n_betas=10, kid=False):
     return dict(v_t=v_t, S=S, J0=Jr @ v_t, A=np.einsum('jv,vck->jck', Jr, S), kid=kid, n_betas=n_betas)
 
 
+def midpoint_centres(lin):
+    """Copy of a linear model whose Hip and Thorax are the midpoints of its hips / shoulders, as the
+    OpenPose and mocap targets build them.  The regressor's own Thorax sits up at the neck base (36 mm above
+    the shoulder midpoint on the mean adult, 15 mm at kid weight 0.75), so Hip->Thorax would compare
+    different points.  For fitting only: the skinned model (MiniSMPL) keeps the regressor's joints."""
+    lin = dict(lin, J0=lin['J0'].copy(), A=lin['A'].copy())
+    for c, (a, b) in (('Hip', ('RHip', 'LHip')), ('Thorax', ('RShoulder', 'LShoulder'))):
+        lin['J0'][J[c]] = 0.5 * (lin['J0'][J[a]] + lin['J0'][J[b]])
+        lin['A'][J[c]] = 0.5 * (lin['A'][J[a]] + lin['A'][J[b]])
+    return lin
+
+
 def mesh_height_m(lin, shape):
     """Crown-to-sole height of the T-pose mesh (y-up), as step_3 measures it."""
     v = lin['v_t'] + lin['S'] @ np.asarray(shape, dtype=np.float64)
@@ -128,19 +148,23 @@ def data_seg_lengths(kps3d_mm, segs=SEGMENTS):
     return np.array(med), np.array(iqr), np.array(n)
 
 
-def fit_betas(lin, target_mm, segs=SEGMENTS, lam=1.0, sigma_mm=10.0):
+def fit_betas(lin, target_mm, segs=SEGMENTS, lam=1.0, sigma_mm=10.0, lam_rest=None):
     """Damped least squares: (fitted - target)/sigma per segment plus sqrt(lam)*beta as a ridge
-    toward the mean shape.  With a kid model the last parameter is the kid weight, bounded [0,1],
-    unregularised, started at 0.5.  Returns (shape, rms residual mm)."""
+    toward the mean shape (lam_rest, when given, replaces lam for betas 1-9: beta 0 is mostly size,
+    the rest proportions and girth).  With a kid model the last parameter is the kid weight, bounded
+    [0,1], unregularised, started at 0.5.  Returns (shape, rms residual mm)."""
     from scipy.optimize import least_squares
     ok = np.isfinite(target_mm)
     segs_ok = [s for s, k in zip(segs, ok) if k]
     tgt = np.asarray(target_mm)[ok]
     n = lin['A'].shape[-1]
     n_reg = n - 1 if lin['kid'] else n
+    w = np.full(n_reg, np.sqrt(lam))
+    if lam_rest is not None:
+        w[1:] = np.sqrt(lam_rest)
 
     def resid(x):
-        return np.concatenate([(seg_lengths_mm(lin, x, segs_ok) - tgt) / sigma_mm, np.sqrt(lam) * x[:n_reg]])
+        return np.concatenate([(seg_lengths_mm(lin, x, segs_ok) - tgt) / sigma_mm, w * x[:n_reg]])
 
     if lin['kid']:
         x0 = np.zeros(n)
@@ -157,15 +181,18 @@ def fit_betas(lin, target_mm, segs=SEGMENTS, lam=1.0, sigma_mm=10.0):
 # ----------------------------------------------------------------------------- skinned model (torch)
 class MiniSMPL:
     """SMPL linear blend skinning at the vertices J_regressor / J_regressor_h36m read.
-    shape: 10 betas, or 11 with the kid weight last."""
+    shape: 10 betas, or 11 with the kid weight last.  full=True skins all 6890 vertices
+    (for rendering: vertices() and faces)."""
 
-    def __init__(self, shape, device='cpu'):
+    def __init__(self, shape, device='cpu', full=False):
         import torch
         m = _load_pkl()
         Jr = m['J_regressor']
         Jr = Jr.toarray() if sp.issparse(Jr) else np.asarray(Jr)
         Jh = load_h36m_regressor()
-        idx = np.where((np.abs(Jr).sum(0) > 0) | (np.abs(Jh).sum(0) > 0))[0]
+        idx = (np.arange(Jr.shape[1]) if full else
+               np.where((np.abs(Jr).sum(0) > 0) | (np.abs(Jh).sum(0) > 0))[0])
+        self.faces = np.asarray(m['f'], dtype=np.int64) if full else None
         v_full = np.asarray(m['v_template'], dtype=np.float64)
         shape = np.asarray(shape, dtype=np.float64)
         S = np.asarray(m['shapedirs'])[idx][:, :, :10]
@@ -184,12 +211,31 @@ class MiniSMPL:
         self.J_rest = self.Jr @ self.v_shaped
         self.n = len(idx)
 
-    def forward(self, rotmats):
-        """rotmats (T,24,3,3) -> SMPL-24 joints (T,24,3), H36M joints (T,17,3); metres, SMPL's frame."""
+    def forward(self, rotmats, moments=None):
+        """rotmats (T,24,3,3) -> SMPL-24 joints (T,24,3), H36M joints (T,17,3); metres, SMPL's frame.
+        moments (P,24,4) (see body_points) adds a third output: those P skinned points (T,P,3)."""
+        import torch
+        A = self.bone_transforms(rotmats)
+        v = self.vertices(rotmats, A)
+        J24, Jh = torch.einsum('jn,tnc->tjc', self.Jr, v), torch.einsum('jn,tnc->tjc', self.Jh, v)
+        if moments is None:
+            return J24, Jh
+        return J24, Jh, torch.einsum('pkj,tkij->tpi', moments, A[:, :, :3, :])
+
+    def vertices(self, rotmats, A=None):
+        """rotmats (T,24,3,3) -> skinned vertices (T,n,3), metres, SMPL's frame (all 6890 when full)."""
         import torch
         T = rotmats.shape[0]
         eye = torch.eye(3, dtype=rotmats.dtype, device=rotmats.device)
         v_posed = self.v_shaped + ((rotmats[:, 1:] - eye).reshape(T, 207) @ self.posedirs).reshape(T, self.n, 3)
+        A = self.bone_transforms(rotmats) if A is None else A
+        Tv = torch.einsum('nk,tkij->tnij', self.W, A)
+        return (Tv[:, :, :3, :3] @ v_posed[..., None])[..., 0] + Tv[:, :, :3, 3]
+
+    def bone_transforms(self, rotmats):
+        """rotmats (T,24,3,3) -> per-bone skinning transforms A (T,24,4,4): rest-pose point -> posed."""
+        import torch
+        T = rotmats.shape[0]
         G = [None] * 24
         rel = self.J_rest.clone()
         rel[1:] = self.J_rest[1:] - self.J_rest[self.parents[1:]]
@@ -203,9 +249,91 @@ class MiniSMPL:
         Jh4 = torch.cat([self.J_rest, torch.zeros(24, 1, dtype=rotmats.dtype, device=rotmats.device)], 1)
         A = G.clone()
         A[:, :, :3, 3] = G[:, :, :3, 3] - (G[:, :, :3, :] @ Jh4[None, :, :, None])[..., 0]
-        Tv = torch.einsum('nk,tkij->tnij', self.W, A)
-        v = (Tv[:, :, :3, :3] @ v_posed[..., None])[..., 0] + Tv[:, :, :3, 3]
-        return torch.einsum('jn,tnc->tjc', self.Jr, v), torch.einsum('jn,tnc->tjc', self.Jh, v)
+        return A
+
+
+def ankle_height_m(shape):
+    """Rest-pose height of the H36M ankle joints above the sole (the lowest vertex), metres,
+    mean of left and right: where a grounded ankle sits above a barefoot floor for this body."""
+    import torch
+    smpl = MiniSMPL(shape, full=True)
+    with torch.no_grad():
+        v = smpl.vertices(torch.eye(3, dtype=torch.float64).expand(1, 24, 3, 3))[0]
+        Jh = smpl.Jh @ v
+    y = v[:, 1]                                                  # SMPL rest frame is y-up
+    return float(np.mean([Jh[H36M.index(j), 1] - y.min() for j in ('RAnkle', 'LAnkle')]))
+
+
+SOLE = ['RHeel', 'RToe', 'RMedial', 'RLateral', 'LHeel', 'LToe', 'LMedial', 'LLateral']
+
+
+def body_points(shape, n_cells=150, sole_mm=15.0):
+    """Skinning moments (9,24,4) for MiniSMPL.forward(..., moments=): row 0 the whole-body centre of
+    mass, rows 1-8 the sole extremes named in SOLE (heel, toe, medial, lateral of each foot).
+
+    COM: the closed rest-pose mesh is filled with a grid (n_cells across its largest extent; rays
+    along the depth axis, inside = between alternate surface crossings), each interior point gets
+    the inverse-distance skin weights of its 8 nearest vertices, and the moments are the mean of
+    w_k [x; 1] over the points -- so the posed COM is exactly the mean of the LBS-skinned interior,
+    uniform density, mass conserved however the limbs overlap.  Pose blend shapes are ignored.
+    Sole: vertices within sole_mm of the foot's lowest point (rest frame y-up, z forward, +x = left)."""
+    from scipy.spatial import cKDTree
+    m = _load_pkl()
+    f = np.asarray(m['f'], dtype=np.int64)
+    W = np.asarray(m['weights'], dtype=np.float64)
+    v_full = np.asarray(m['v_template'], dtype=np.float64)
+    shape = np.asarray(shape, dtype=np.float64)
+    S = np.asarray(m['shapedirs'])[:, :, :10]
+    if shape.size > 10:
+        S = np.concatenate([S, kid_shapedir(v_full)[:, :, None]], axis=2)
+    v = v_full + S @ shape[:S.shape[-1]]
+
+    lo, hi = v.min(0), v.max(0)
+    h = (hi - lo).max() / n_cells
+    gx = np.arange(lo[0] + h / 2, hi[0], h)
+    gy = np.arange(lo[1] + h / 2, hi[1], h)
+    hits = {}
+    a, b, c = v[f[:, 0]], v[f[:, 1]], v[f[:, 2]]
+    for i in range(len(f)):                                     # cast +z rays through every column a triangle covers
+        P = np.stack([a[i], b[i], c[i]])
+        ix = np.where((gx >= P[:, 0].min()) & (gx <= P[:, 0].max()))[0]
+        iy = np.where((gy >= P[:, 1].min()) & (gy <= P[:, 1].max()))[0]
+        if not len(ix) or not len(iy):
+            continue
+        X, Y = np.meshgrid(gx[ix], gy[iy], indexing='ij')
+        d = (P[1, 0] - P[0, 0]) * (P[2, 1] - P[0, 1]) - (P[2, 0] - P[0, 0]) * (P[1, 1] - P[0, 1])
+        if abs(d) < 1e-15:
+            continue
+        l1 = ((X - P[0, 0]) * (P[2, 1] - P[0, 1]) - (P[2, 0] - P[0, 0]) * (Y - P[0, 1])) / d
+        l2 = ((P[1, 0] - P[0, 0]) * (Y - P[0, 1]) - (X - P[0, 0]) * (P[1, 1] - P[0, 1])) / d
+        inside = (l1 >= 0) & (l2 >= 0) & (l1 + l2 <= 1)
+        z = P[0, 2] + l1 * (P[1, 2] - P[0, 2]) + l2 * (P[2, 2] - P[0, 2])
+        for (jx, jy), zz in zip(np.argwhere(inside), z[inside]):
+            hits.setdefault((ix[jx], iy[jy]), []).append(zz)
+    pts = []
+    for (jx, jy), zs in hits.items():
+        zs = np.sort(zs)
+        if len(zs) % 2:                                          # grazed an edge: column ambiguous, skip
+            continue
+        for z0, z1 in zip(zs[0::2], zs[1::2]):
+            zc = np.arange(np.ceil((z0 - lo[2]) / h - 0.5) + 0.5, (z1 - lo[2]) / h, 1.0) * h + lo[2]
+            pts.extend((gx[jx], gy[jy], zz) for zz in zc if z0 <= zz <= z1)
+    pts = np.asarray(pts)
+    dist, nn = cKDTree(v).query(pts, k=8)
+    iw = 1.0 / np.maximum(dist, 1e-6)
+    w_pts = (W[nn] * iw[..., None]).sum(1) / iw.sum(1, keepdims=True)
+    ph = np.concatenate([pts, np.ones((len(pts), 1))], 1)
+    rows = [np.einsum('pk,pj->kj', w_pts, ph) / len(pts)]
+
+    part = W.argmax(1)
+    for side, (ja, jf), sgn in (('R', (SMPL24.index('R_Ankle'), SMPL24.index('R_Foot')), -1.0),
+                                ('L', (SMPL24.index('L_Ankle'), SMPL24.index('L_Foot')), 1.0)):
+        foot = np.where(np.isin(part, (ja, jf)))[0]
+        sole = foot[v[foot, 1] < v[foot, 1].min() + sole_mm / 1000.0 * (hi[1] - lo[1]) / 1.7]
+        pick = [sole[v[sole, 2].argmin()], sole[v[sole, 2].argmax()],
+                sole[(-sgn * v[sole, 0]).argmax()], sole[(sgn * v[sole, 0]).argmax()]]   # heel toe medial lateral
+        rows += [W[k][:, None] * np.r_[v[k], 1.0][None, :] for k in pick]
+    return np.stack(rows)
 
 
 def rodrigues(aa):

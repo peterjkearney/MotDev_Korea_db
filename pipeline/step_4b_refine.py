@@ -4,13 +4,15 @@
 step_4 is one recipe: MotionBERT's shape, rescaled to the stature, placed rigidly by PnP per
 frame.  This runs the configurations in formulations.py, each a different combination of
 
-    shape        MotionBERT's betas | adult SMPL fitted to bone lengths | kid blend | cohort kid
+    shape        MotionBERT's betas | adult SMPL fitted to bone lengths | kid blend | cohort kid (each fitted
+                 with or without the hip/shoulder widths, _nw)
     placement    rigid PnP | frozen ray rotation with the translation solved | free rotation
     body         MotionBERT's joint angles kept, or refined against the 2D (SMPLify-style,
                  L-BFGS over the whole trial: robust reprojection + pull toward MotionBERT +
                  temporal smoothness)
     2D joint set which H36M joints the reprojection term (or PnP) uses
     feet / floor foot pin while grounded, floor hinge, grounded ankle held at its floor height
+    balance      the mesh's centre of mass held over the base of support of the grounded feet
 
 and writes each result in step_4's file format one folder down, so step_8 --config scores it
 and nothing else in the pipeline has to know:
@@ -26,7 +28,8 @@ Every configuration computes its own PnP on its own skeleton (the frozen-rotatio
 their per-trial constant from it), so step_4 need not have run.  The foot-contact detector
 works from the 2D alone: an ankle whose smoothed pixel speed stays low for min_contact_s is
 grounded.  The lab floor is z = 0 of the calib's lab frame (BioCV mocap frame, Korea fitted
-floor).
+floor).  Every output also carries the mesh's whole-body centre of mass (com_placed, camera frame;
+smpl_lite.body_points), whether or not the configuration constrains it.
 
     python3 step_4b_refine.py                            # every trial, every configuration; done ones skipped
     python3 step_4b_refine.py --configs C8 --user B023
@@ -47,7 +50,8 @@ from config import (DETECTORS, OUT_DIR, twod_path, betas_path, final_betas_path,
 from step_4_PnP import solve_root_pose, parse_joints, _PNP_CONF_THRESH
 from utils.calibration import load_calib
 from utils.rts_smoother import rts_smooth_3d
-from utils.smpl_lite import H36M, SMPL24, MiniSMPL, load_linear, mesh_height_m, rodrigues, project, kabsch
+from utils.smpl_lite import (H36M, SMPL24, MiniSMPL, load_linear, mesh_height_m, ankle_height_m, body_points, rodrigues,
+                              project, kabsch)
 
 GROUPS = {'trunk': ['Spine1', 'Spine2', 'Spine3', 'Neck', 'Head'], 'hips': ['L_Hip', 'R_Hip'],
           'knees': ['L_Knee', 'R_Knee'], 'ankles/feet': ['L_Ankle', 'R_Ankle', 'L_Foot', 'R_Foot'],
@@ -78,16 +82,23 @@ class Shapes:
             b = np.load(final_betas_path(user, action, detector, cam), allow_pickle=True)['betas'].ravel()[:10].astype(np.float64)
             h = mesh_height_m(self.lin[10], b)
             return b, self.stature(user) / h, h, f"MotionBERT betas, rescaled x{self.stature(user) / h:.3f} to {self.stature(user):.2f} m"
-        if name in ('adult', 'kid'):
+        if name in ('adult', 'kid', 'adult_nw', 'kid_nw'):
             p = shapes_path(user)
             if not os.path.exists(p):
                 raise FileNotFoundError(f'{p} -- run step_2c_fit_shape.py first')
-            b = np.load(p, allow_pickle=True)[name].astype(np.float64)
-        elif name == 'cohort_kid':
+            z = np.load(p, allow_pickle=True)
+            if name not in z.files:
+                raise FileNotFoundError(f'{p} has no {name!r} -- rerun step_2c_fit_shape.py --force')
+            b = z[name].astype(np.float64)
+        elif name in ('cohort_kid', 'cohort_kid_nw'):
             p = cohort_shapes_path()
             if not os.path.exists(p):
                 raise FileNotFoundError(f'{p} -- run step_2c_fit_shape.py --cohort first')
-            b = np.load(p, allow_pickle=True)['kid'].astype(np.float64)
+            key = name[len('cohort_'):]
+            z = np.load(p, allow_pickle=True)
+            if key not in z.files:
+                raise FileNotFoundError(f'{p} has no {key!r} -- rerun step_2c_fit_shape.py --force, then --cohort')
+            b = z[key].astype(np.float64)
         else:
             raise ValueError(f'unknown shape {name!r}')
         h = mesh_height_m(self.lin[len(b)], b)
@@ -128,33 +139,41 @@ def run_camera(user, action, detector, cam, cid, cfg, shapes, device, log):
 
     smpl = MiniSMPL(shape, device)
     f64 = dict(dtype=torch.float64, device=device)
+    moments = torch.tensor(body_points(shape), **f64)            # row 0 COM, rows 1-8 sole points (SOLE)
+    # floor_contact_m 'mesh': this body's own ankle height above its sole, at the placement scale
+    contact_m = (ankle_height_m(shape) * scale if cfg['floor_contact_m'] == 'mesh' else float(cfg['floor_contact_m']))
+    if cfg['w_floor_contact'] > 0:
+        log(f'  {cam}: grounded ankle held at {1000 * contact_m:.0f} mm above the floor ({cfg["floor_contact_m"]})')
     rot0_t = torch.tensor(rot0, **f64)
     with torch.no_grad():
-        J24_0, Jh_0 = smpl.forward(rot0_t)
+        J24_0, Jh_0, P_0 = smpl.forward(rot0_t, moments)
     Jh_m = Jh_0.cpu().numpy() * scale                       # (T,17,3) metres, mesh frame
     J24_m = J24_0.cpu().numpy() * scale
+    com_m = P_0[:, 0].cpu().numpy() * scale
 
     R0, t0, pnp_ok = pnp_init(Jh_m, kp2d, K, dist_cv, use_joint)
     log(f'  {cam}: PnP solved {pnp_ok.sum()}/{T} frames' + (f' (without {cfg["exclude_2d"]})' if cfg['exclude_2d'] else ''))
     common = dict(pnp_ok=pnp_ok, detector=np.array(detector), pnp_joints_used=use_joint, pnp_conf_thresh=_PNP_CONF_THRESH,
                   cam_w=w, cam_h=h, cam_K=K, cam_L_ext=L_ext, cam_dist_cv=dist_cv,
                   config=np.array(cid), config_json=np.array(json.dumps(cfg)), shape=shape.astype(np.float32),
-                  scale_factor=scale, mesh_height_m=mesh_h, fps=fps)
+                  scale_factor=scale, mesh_height_m=mesh_h, fps=fps, floor_contact_m=contact_m)
 
     if cfg['placement'] == 'pnp':
         H = np.full((T, 17, 3), np.nan, np.float32)
         S = np.full((T, 24, 3), np.nan, np.float32)
+        C = np.full((T, 3), np.nan, np.float32)
         for i in np.where(pnp_ok)[0]:
             H[i] = (R0[i] @ Jh_m[i].T).T + t0[i]
             S[i] = (R0[i] @ J24_m[i].T).T + t0[i]
+            C[i] = R0[i] @ com_m[i] + t0[i]
         if pnp_ok.any():
             root_s, _ = rts_smooth_3d(H[:, 0, :], pnp_ok, H[:, 0, :], 1 / fps, sigma_along=0.15, sigma_perp=0.02,
                                       process_accel_std=10.0)
             adj = (root_s - H[:, 0, :])[:, None, :]
-            Hs, Ss = H + adj, S + adj
+            Hs, Ss, C = H + adj, S + adj, C + adj[:, 0]
         else:
             Hs, Ss = H, S
-        return dict(common, kps_H36M_placed=H, kps_SMPL24_placed=S, kps_H36M_smooth=Hs, kps_SMPL24_smooth=Ss,
+        return dict(common, kps_H36M_placed=H, kps_SMPL24_placed=S, kps_H36M_smooth=Hs, kps_SMPL24_smooth=Ss, com_placed=C,
                     rotmats=rot0.astype(np.float32), refined=False)
 
     if not pnp_ok.any():
@@ -225,7 +244,7 @@ def run_camera(user, action, detector, cam, cid, cfg, shapes, device, log):
     min_contact = max(2, int(round(cfg['min_contact_s'] * fps)))
     speed_thr = cfg['foot_speed_px_s'] / fps
     segments = []
-    if cfg['w_foot'] > 0 or cfg['w_floor_contact'] > 0:
+    if cfg['w_foot'] > 0 or cfg['w_floor_contact'] > 0 or cfg['w_com'] > 0:
         for jn in ('RAnkle', 'LAnkle'):
             j = H36M.index(jn)
             xy = kp2d[:, j, :2].copy()
@@ -257,6 +276,20 @@ def run_camera(user, action, detector, cam, cid, cfg, shapes, device, log):
     seg_t = [(j, torch.tensor(s, device=device)) for j, s in segments]
     ankle_idx = [H36M.index('RAnkle'), H36M.index('LAnkle')]
     ok_t = torch.tensor(frame_ok, device=device)
+    # base of support: the 4 sole points of each foot grounded at that frame (SOLE order: R then L)
+    grounded = np.zeros((T, 2), bool)                              # R, L: the contact detector's verdict
+    for j, s in segments:
+        grounded[s, 0 if j == H36M.index('RAnkle') else 1] = True
+    sole_on = np.repeat(grounded, 4, axis=1)
+    if cfg['com_support'] == 'double':
+        sole_on[~(sole_on[:, 0] & sole_on[:, 4])] = False
+    elif cfg['com_support'] != 'any':
+        raise ValueError(f"unknown com_support {cfg['com_support']!r}")
+    sole_on &= frame_ok[:, None]
+    bos_t = torch.tensor(sole_on.any(1), device=device)
+    sole_off_t = torch.tensor(~sole_on, device=device)
+    ang = np.linspace(0, 2 * np.pi, 32, endpoint=False)
+    U_t = torch.tensor(np.stack([np.cos(ang), np.sin(ang)], 1), **f64)
     R0_t, t0_t = torch.tensor(R0, **f64), torch.tensor(t0, **f64)
     obs, W, K_t = torch.tensor(kp2d[:, :, :2], **f64), torch.tensor(w_obs, **f64), torch.tensor(K, **f64)
     dg = torch.zeros(T, 3, **f64, requires_grad=True)
@@ -272,11 +305,31 @@ def run_camera(user, action, detector, cam, cid, cfg, shapes, device, log):
         R = rodrigues(dg_) @ R0_t
         return (R[:, None] @ (Jh * scale_t)[..., None])[..., 0] + (t0_t + dt_)[:, None]
 
+    def to_lab(X_cam):
+        return (X_cam - t_cam_t) @ R_cam_t
+
+    def com_excess(P_cam):
+        """Horizontal distance (m) the COM lies outside the convex hull of the grounded sole points,
+        per frame (<= 0 inside), from the hull's support function over 32 directions."""
+        P_lab = to_lab(P_cam)
+        h = (P_lab[:, 1:, :2] @ U_t.T).masked_fill(sole_off_t[..., None], float('-inf')).amax(1)
+        return (P_lab[:, 0, :2] @ U_t.T - h).amax(1)
+
+    def com_report(P_cam, label):
+        if not bos_t.any():
+            return
+        with torch.no_grad():
+            ex = com_excess(P_cam)[bos_t].cpu().numpy()
+        out = ex > cfg['com_margin_m']
+        log(f'  {cam}: {label}: COM over the base of support on {bos_t.sum()} frames ({cfg["com_support"]} stance); '
+            f'{out.sum()} beyond {1000 * cfg["com_margin_m"]:.0f} mm, worst {1000 * ex.max():.0f} mm '
+            f'(median {1000 * np.median(ex):.0f} mm)')
+
     def floor_terms(X_cam):
         e = torch.zeros((), **f64)
         if cfg['w_foot'] <= 0 and cfg['w_floor'] <= 0 and cfg['w_floor_contact'] <= 0:
             return e
-        X_lab = (X_cam - t_cam_t) @ R_cam_t
+        X_lab = to_lab(X_cam)
         if cfg['w_floor'] > 0:
             pen = torch.clamp(-X_lab[:, ankle_idx, 2], min=0.0) ** 2
             e = e + cfg['w_floor'] * pen[ok_t].sum()
@@ -285,12 +338,15 @@ def run_camera(user, action, detector, cam, cid, cfg, shapes, device, log):
                 xy = X_lab[seg, j, :2]
                 e = e + cfg['w_foot'] * ((xy - xy.mean(0, keepdim=True)) ** 2).sum()
             if cfg['w_floor_contact'] > 0:
-                e = e + cfg['w_floor_contact'] * ((X_lab[seg, j, 2] - cfg['floor_contact_m']) ** 2).sum()
+                e = e + cfg['w_floor_contact'] * ((X_lab[seg, j, 2] - contact_m) ** 2).sum()
         return e
 
     def objective(use_body):
-        _, Jh = smpl.forward(rotmats(db) if use_body else rot0_t)
-        X = place_(Jh, dg, dt)
+        use_com = cfg['w_com'] > 0 and bool(bos_t.any())
+        out = smpl.forward(rotmats(db) if use_body else rot0_t, moments if use_com else None)
+        X = place_(out[1], dg, dt)
+        e_com = (cfg['w_com'] * torch.clamp(com_excess(place_(out[2], dg, dt))[bos_t] - cfg['com_margin_m'], min=0.0) ** 2).sum() \
+            if use_com else torch.zeros((), **f64)
         r = (project(X, K_t, dist_cv) - obs) / sig
         rho = hub ** 2 * (torch.sqrt(1 + (r / hub) ** 2) - 1)
         e_rep = (W[..., None] * rho).sum()
@@ -299,7 +355,7 @@ def run_camera(user, action, detector, cam, cid, cfg, shapes, device, log):
         e_sm = e_sm + cfg['w_smooth'] * ((dg[1:] - dg[:-1]) ** 2).sum()
         tr = t0_t + dt
         e_tr = cfg['w_trans_acc'] * ((tr[2:] - 2 * tr[1:-1] + tr[:-2]) ** 2).sum()
-        return e_rep + e_pull + e_sm + e_tr + floor_terms(X), (e_rep, e_pull, e_sm, e_tr)
+        return e_rep + e_pull + e_sm + e_tr + floor_terms(X) + e_com, (e_rep, e_pull, e_sm, e_tr, e_com)
 
     def rms_px(use_body):
         with torch.no_grad():
@@ -321,10 +377,12 @@ def run_camera(user, action, detector, cam, cid, cfg, shapes, device, log):
         opt.step(closure)
         loss, parts = objective(use_body)
         log(f'  {cam}: {label}: objective {float(loss):.1f} (reproj {float(parts[0]):.1f}, pull {float(parts[1]):.1f}, '
-            f'smooth {float(parts[2]):.1f}, trans-acc {float(parts[3]):.1f}), reprojection RMS {rms_px(use_body):.2f} px, '
+            f'smooth {float(parts[2]):.1f}, trans-acc {float(parts[3]):.1f}, balance {float(parts[4]):.1f}), reprojection RMS {rms_px(use_body):.2f} px, '
             f'{time.time() - t_start:.0f} s')
 
     log(f'  {cam}: start: reprojection RMS {rms_px(False):.2f} px ({mode} rotation, MotionBERT pose)')
+    with torch.no_grad():
+        com_report(place_(P_0, dg, dt), 'start')
     glob_params = [dg, dt] if mode == 'free' else [dt]
     stage(glob_params, False, cfg['iters_global'], 'stage 1 (global ' + ('pose' if mode == 'free' else 'translation') + ')')
     if cfg['body']:
@@ -332,10 +390,12 @@ def run_camera(user, action, detector, cam, cid, cfg, shapes, device, log):
 
     with torch.no_grad():
         rot_new = rotmats(db) if cfg['body'] else rot0_t
-        J24, Jh = smpl.forward(rot_new)
+        J24, Jh, P = smpl.forward(rot_new, moments)
         R_new = rodrigues(dg) @ R0_t
         t_new = t0_t + dt
         H = place_(Jh, dg, dt).cpu().numpy()
+        com_report(place_(P, dg, dt), 'end')
+        C = place_(P[:, :1], dg, dt)[:, 0].cpu().numpy()
         S = ((R_new[:, None] @ (J24 * scale_t)[..., None])[..., 0] + t_new[:, None]).cpu().numpy()
         if cfg['body']:
             deg = np.degrees(torch.linalg.norm(db, dim=-1).cpu().numpy())
@@ -345,9 +405,10 @@ def run_camera(user, action, detector, cam, cid, cfg, shapes, device, log):
         log(f'  {cam}: translation change vs PnP: mean {1000 * dz.mean(0).round(3)} mm, |max| {1000 * np.abs(dz).max():.0f} mm')
     H[~frame_ok] = np.nan
     S[~frame_ok] = np.nan
+    C[~frame_ok] = np.nan
     return dict(common, pnp_ok=frame_ok, kps_H36M_placed=H.astype(np.float32), kps_SMPL24_placed=S.astype(np.float32),
                 kps_H36M_smooth=H.astype(np.float32), kps_SMPL24_smooth=S.astype(np.float32),
-                rotmats=rot_new.cpu().numpy().astype(np.float32), refined=True)
+                com_placed=C.astype(np.float32), foot_grounded=grounded, rotmats=rot_new.cpu().numpy().astype(np.float32), refined=True)
 
 
 # ----------------------------------------------------------------------------- batch

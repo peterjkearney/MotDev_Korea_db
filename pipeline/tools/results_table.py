@@ -54,7 +54,7 @@ def rows_for(user, action, cid, detector, gt):
         row = dict(user=user, action=action, camera=cam, config=cid, gt=gt, detector=detector,
                    n_cameras=len(cams), angle_deg=round(float(m['angles_deg'][i]), 1), n_frames=int(m['n_frames'][i]),
                    stature_mm='' if np.isnan(stature) else round(stature, 1))
-        for key in ('shape', 'placement', 'body', 'exclude_2d', 'w_foot', 'w_floor', 'w_floor_contact', 'note'):
+        for key in ('shape', 'placement', 'body', 'exclude_2d', 'w_foot', 'w_floor', 'w_floor_contact', 'w_com', 'note'):
             row[f'cfg_{key}'] = cfg.get(key, 'motionbert' if key == 'shape' else 'pnp' if key == 'placement'
                                      else False if key == 'body' else '' if key in ('exclude_2d', 'note') else 0.0)
         # the shape actually used

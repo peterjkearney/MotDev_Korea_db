@@ -8,12 +8,17 @@ skeleton carries the subject's own bone lengths; this fits two shapes to them:
     adult   SMPL's 10 betas                                (cannot reach a child's leg-to-torso ratio)
     kid     the 10 betas + AGORA's kid template as an 11th direction, weight in [0,1]
 
+and each again WITHOUT the hip and shoulder widths (adult_nw, kid_nw): those segments measure the
+joint definition (OpenPose vs SMPL's regressor) as much as the body and are the only terms that set
+girth, so the _nw shapes take length and proportion from the bones, girth from the prior (--lam-rest
+on betas 1-9), and compare Hip->Thorax with the model's hip/shoulder midpoints, as the target builds it.
+
 The segment lengths (utils/smpl_lite.SEGMENTS) are medians over every frame of every laid-out rep
 of the subject, in the target's own units (mm), so the fitted body is metric and step_4b does not
 rescale it.  Nothing here depends on the detector: the target is the triangulated OpenPose skeleton.
 
     reads   {OUT_DIR}/{user}/{action}/Analysis/H36M/openpose_tri_h36m.npz   (every rep of the subject)
-    writes  {OUT_DIR}/{user}/shapes.npz                                     adult (10,), kid (11,), fit residuals
+    writes  {OUT_DIR}/{user}/shapes.npz                                     adult (10,), kid (11,), adult_nw, kid_nw, fit residuals
 
 --cohort, after every subject is fitted: the median kid shape over subjects, for the
 'cohort_kid' configuration (the version a single-camera product could use, having no
@@ -32,7 +37,8 @@ import os
 import numpy as np
 
 from config import OUT_DIR, tri_target_path, shapes_path, cohort_shapes_path, require_out_dir
-from utils.smpl_lite import (SEGMENTS, load_linear, fit_betas, seg_lengths_mm, data_seg_lengths, mesh_height_m)
+from utils.smpl_lite import (SEGMENTS, SEGMENTS_NO_WIDTH, load_linear, midpoint_centres, fit_betas, seg_lengths_mm,
+                             data_seg_lengths, mesh_height_m)
 
 
 def subjects_with_targets(user=None):
@@ -55,6 +61,12 @@ def fit_subject(user, targets, lin_adult, lin_kid, args):
         raise ValueError(f'only {np.isfinite(tgt).sum()} segments with data over {len(targets)} reps')
     adult, rms_a = fit_betas(lin_adult, tgt, SEGMENTS, lam=args.lam, sigma_mm=args.sigma_mm)
     kid, rms_k = fit_betas(lin_kid, tgt, SEGMENTS, lam=args.lam, sigma_mm=args.sigma_mm)
+    tgt_nw = np.array([tgt[SEGMENTS.index(s)] for s in SEGMENTS_NO_WIDTH])
+    mid_adult, mid_kid = midpoint_centres(lin_adult), midpoint_centres(lin_kid)
+    adult_nw, rms_anw = fit_betas(mid_adult, tgt_nw, SEGMENTS_NO_WIDTH, lam=args.lam, sigma_mm=args.sigma_mm,
+                                  lam_rest=args.lam_rest)
+    kid_nw, rms_knw = fit_betas(mid_kid, tgt_nw, SEGMENTS_NO_WIDTH, lam=args.lam, sigma_mm=args.sigma_mm,
+                                lam_rest=args.lam_rest)
     out = shapes_path(user)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     np.savez(out, adult=adult.astype(np.float32), kid=kid.astype(np.float32),
@@ -62,27 +74,42 @@ def fit_subject(user, targets, lin_adult, lin_kid, args):
              adult_height_m=mesh_height_m(lin_adult, adult), kid_height_m=mesh_height_m(lin_kid, kid),
              segments=np.array([f'{a}-{b}' for a, b in SEGMENTS]), target_mm=tgt, target_iqr_mm=iqr, target_n=n,
              adult_fit_mm=seg_lengths_mm(lin_adult, adult), kid_fit_mm=seg_lengths_mm(lin_kid, kid),
+             adult_nw=adult_nw.astype(np.float32), kid_nw=kid_nw.astype(np.float32),
+             adult_nw_rms_mm=rms_anw, kid_nw_rms_mm=rms_knw,
+             adult_nw_height_m=mesh_height_m(lin_adult, adult_nw), kid_nw_height_m=mesh_height_m(lin_kid, kid_nw),
+             segments_nw=np.array([f'{a}-{b}' for a, b in SEGMENTS_NO_WIDTH]),
+             adult_nw_fit_mm=seg_lengths_mm(mid_adult, adult_nw, SEGMENTS_NO_WIDTH),
+             kid_nw_fit_mm=seg_lengths_mm(mid_kid, kid_nw, SEGMENTS_NO_WIDTH), lam_rest=args.lam_rest,
              n_reps=len(targets), n_frames=int(np.isfinite(kps).all(-1).any(-1).sum()),
              lam=args.lam, sigma_mm=args.sigma_mm, source=np.array('openpose_tri_h36m.npz, all-camera, every rep'))
     return (f'{len(targets)} reps, {int(n.max())} frames: adult betas max |{np.abs(adult).max():.1f}| RMS {rms_a:.1f} mm; '
-            f'kid weight {kid[-1]:.2f}, betas max |{np.abs(kid[:-1]).max():.1f}|, RMS {rms_k:.1f} mm')
+            f'kid weight {kid[-1]:.2f}, betas max |{np.abs(kid[:-1]).max():.1f}|, RMS {rms_k:.1f} mm; '
+            f'no widths: kid weight {kid_nw[-1]:.2f}, RMS {rms_knw:.1f} mm')
 
 
 def cohort(args):
     files = sorted(glob.glob(shapes_path('*')))
     if not files:
         raise SystemExit(f'no {{user}}/shapes.npz under {OUT_DIR} -- fit the subjects first')
-    subs, kids, adults = [], [], []
+    subs, kids, adults, kids_nw = [], [], [], []
     for p in files:
         z = np.load(p, allow_pickle=True)
         subs.append(os.path.basename(os.path.dirname(p)))
         kids.append(z['kid'])
         adults.append(z['adult'])
+        if 'kid_nw' in z.files:
+            kids_nw.append(z['kid_nw'])
     kids, adults = np.array(kids), np.array(adults)
     med_kid, med_adult = np.median(kids, 0), np.median(adults, 0)
+    extra = {}
+    if len(kids_nw) == len(subs):
+        kids_nw = np.array(kids_nw)
+        extra = dict(kid_nw=np.median(kids_nw, 0).astype(np.float32), kid_nw_all=kids_nw.astype(np.float32))
+    else:
+        print(f'note: {len(subs) - len(kids_nw)} subject(s) have no kid_nw (refit with --force); no cohort kid_nw written')
     np.savez(cohort_shapes_path(), kid=med_kid.astype(np.float32), adult=med_adult.astype(np.float32),
              subjects=np.array(subs), kid_all=kids.astype(np.float32), adult_all=adults.astype(np.float32),
-             note=np.array('median over subjects of step_2c shapes'))
+             note=np.array('median over subjects of step_2c shapes'), **extra)
     w = kids[:, -1]
     print(f'{len(subs)} subjects: kid weight median {np.median(w):.2f}, range {w.min():.2f}-{w.max():.2f}, '
           f'IQR {np.percentile(w, 25):.2f}-{np.percentile(w, 75):.2f}')
@@ -94,6 +121,8 @@ def main():
     ap.add_argument('--user', default=None, help='default: every subject with a triangulated target')
     ap.add_argument('--lam', type=float, default=1.0, help='ridge weight toward the mean shape')
     ap.add_argument('--sigma-mm', type=float, default=10.0, help='segment-length noise scale')
+    ap.add_argument('--lam-rest', type=float, default=10.0,
+                    help='_nw shapes: ridge weight on betas 1-9 (girth and proportions; beta 0 keeps --lam)')
     ap.add_argument('--cohort', action='store_true', help='write the cohort-median shape from the fitted subjects')
     ap.add_argument('--force', action='store_true', help='redo subjects whose shapes.npz exists')
     ap.add_argument('--dry-run', action='store_true')
