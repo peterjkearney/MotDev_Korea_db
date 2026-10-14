@@ -11,6 +11,7 @@ metric each: tools/compare_configs.py makes them, with the paired differences pe
 
     python3 tools/results_table.py --gt triangulated --out /content/drive/.../results_table_tri_KOREA.csv
     python3 tools/results_table.py --gt mocap --detector yolo --out .../results_table_BioCV.csv
+    python3 tools/results_table.py --subset dev_subset      # only the subset's trials -> {OUT_DIR}/dev_subset/
 """
 import argparse
 import csv
@@ -23,7 +24,8 @@ import numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
-from config import OUT_DIR, DETECTORS, metrics_path, pnp_path, final_betas_path, shapes_path, require_out_dir  # noqa: E402
+from config import (OUT_DIR, DETECTORS, metrics_path, pnp_path, final_betas_path, shapes_path, require_out_dir,  # noqa: E402
+                    read_subset, subset_dir)
 import formulations  # noqa: E402
 
 SERIES = ('placed_all', 'placed_conf', 'smooth_all', 'smooth_conf')
@@ -95,11 +97,20 @@ def main():
     ap.add_argument('--detector', choices=DETECTORS, default='openpose')
     ap.add_argument('--gt', choices=['mocap', 'triangulated'], default='triangulated')
     ap.add_argument('--out', default=None, help='CSV path (default {OUT_DIR}/results_table[_tri].csv)')
+    ap.add_argument('--subset', default=None,
+                    help="only this subset's trials (pick_dev_subset.py JSON, or its name under OUT_DIR); "
+                         'default output {OUT_DIR}/{subset name}/')
     args = ap.parse_args()
     require_out_dir()
-    out = args.out or os.path.join(OUT_DIR, 'results_table.csv' if args.gt == 'mocap' else 'results_table_tri.csv')
+    root, keep = OUT_DIR, None
+    if args.subset:
+        name, trials = read_subset(args.subset)
+        root, keep = subset_dir(name), {(u, a) for u, acts in trials.items() for a in acts}
+    out = args.out or os.path.join(root, 'results_table.csv' if args.gt == 'mocap' else 'results_table_tri.csv')
     rows = []
     for u, a, cid in trials_with_metrics(args.detector, args.gt):
+        if keep is not None and (u, a) not in keep:
+            continue
         try:
             rows += rows_for(u, a, cid, args.detector, args.gt)
         except Exception as e:

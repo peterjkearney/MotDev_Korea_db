@@ -151,6 +151,22 @@ def stature_path(user):
     return os.path.join(TRIAL_DIR, user, 'user_meta.json')
 
 
+def read_subset(path):
+    """A trial subset (datasets/korea/pick_dev_subset.py) -> (name, {user: [actions]}).  A bare name is
+    looked for under OUT_DIR as {name}.json."""
+    import json
+    if not os.path.exists(path) and os.path.exists(os.path.join(OUT_DIR, path + '.json')):
+        path = os.path.join(OUT_DIR, path + '.json')
+    with open(path) as f:
+        s = json.load(f)
+    return s['name'], {u: list(a) for u, a in s['trials'].items()}
+
+
+def subset_dir(name):
+    """{OUT_DIR}/{name}/: where a subset's tables go, apart from the full set's."""
+    return os.path.join(OUT_DIR, name)
+
+
 def find_cameras(path_fn, detector, user=None, action=None, cameras=None):
     """[(user, action, cam)] for every file `path_fn(user, action, detector, cam)` under OUT_DIR,
     narrowed by --user / --action / --cameras when given.  How the batch steps discover work."""

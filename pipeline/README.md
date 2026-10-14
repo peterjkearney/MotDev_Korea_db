@@ -224,6 +224,16 @@ python3 tools/compare_configs.py [--baseline C8]                        # wide v
 python3 datasets/korea/run_korea.py --gt3d .../Korea/B/GT3D                      # all of the above in order, resumable
 ```
 
+Development vs held-out.  Recipe work is judged on a fixed subset of subjects; the rest are run once,
+when the recipe is settled.  Lay out and run MotionBERT on everything, pick the subset, then iterate:
+
+```
+python3 datasets/korea/run_korea.py --gt3d .../GT3Dv4 --until step_4             # layout + MotionBERT side, every subject
+python3 datasets/korea/pick_dev_subset.py                                        # -> {OUT_DIR}/dev_subset.json (10 subjects x 3 reps)
+python3 datasets/korea/run_korea.py --gt3d .../GT3Dv4 --from step_2c --subset dev_subset --configs C8,C13
+                                                                                 # tables -> {OUT_DIR}/dev_subset/
+```
+
 Layout additions:
 
 ```
