@@ -35,6 +35,11 @@ A configuration is one way of turning MotionBERT's pass-1 rotations into a place
     com_margin_m slack outside the base of support before the hinge bites, metres
     pull_scale   {SMPL-24 joint: multiplier} on w_pull for that joint's pull toward MotionBERT's angle (default 1):
                  freedom where MotionBERT under-reproduces flexion along the line of sight
+    foot_lowest_margin_m  swing-foot veto in 3D: an ankle this far above the other in MotionBERT's skeleton (lab
+                 heights) is not grounded; perspective-proof, unlike foot_lowest_margin_px (0 = off)
+    hidden_foot_contact  a foot whose 2D ankle is not confident (hidden behind the other) is grounded while
+                 the other foot is, if MotionBERT's skeleton has it level with and still relative to the grounded
+                 one (within hidden_foot_dz_m, below hidden_foot_speed_m_s); otherwise such a foot never counts
     com_support  'any': frames with either foot grounded (one foot's sole alone when single stance);
                  'double': only frames with both feet grounded
 
@@ -55,6 +60,7 @@ BALANCE = dict(w_com=3000.0, com_margin_m=0.03, com_support='any')
 DEFAULTS = dict(shape='motionbert', joints='h36m', placement='ray_const', body=True, exclude_2d='',
                 w_foot=0.0, w_floor=0.0, w_floor_contact=0.0, floor_contact_m=0.025,
                 w_com=0.0, com_margin_m=0.03, com_support='any',
+                hidden_foot_contact=False, hidden_foot_dz_m=0.03, hidden_foot_speed_m_s=0.3, foot_lowest_margin_m=0.0,
                 w_pull=30.0, pull_scale={}, w_smooth=30.0, w_trans_acc=1e4, sigma_px=5.0, huber=20.0,
                 conf_thresh=0.3, stance_sec=1.5,
                 min_contact_s=0.1, foot_speed_px_s=90.0, foot_lowest_margin_px=30.0,
@@ -97,9 +103,11 @@ CHAIN = {
                 note='C12 with a girth prior instead of the betas 1-9 ridge'),
     # feet held firmly at the body's own ankle height, centre of mass pulled over the feet: MotionBERT
     # under-reproduces lean along the line of sight (55-90% of it), which the 2D cannot see
-    'C14': dict(shape='kid_s24', joints='smpl24', placement='ray_const', body=True, exclude_2d=HEAD, **FLOOR,
+    'C14': dict(shape='kid_s24g', joints='smpl24', placement='ray_const', body=True, exclude_2d=HEAD, **FLOOR,
                 w_floor_contact=3e4, floor_contact_m='mesh_kp', w_com=1e4, com_margin_m=0.0, com_support='any',
-                note='C12 + firm feet at the mesh ankle height (above its toe/heel keypoints) + balance'),
+                hidden_foot_contact=True, foot_lowest_margin_px=0.0, foot_lowest_margin_m=0.03,
+                note='SMPL-24 joints, girth-prior shape, firm feet at the mesh ankle height (above its toe/heel '
+                     'keypoints), balance, hidden feet grounded from the skeleton'),
 }
 
 # one component removed from the child recipe at a time

@@ -106,6 +106,46 @@ class Shapes:
         return b, 1.0, h, f'{name} shape (metric, T-pose {h:.3f} m' + (f', kid weight {b[-1]:.2f})' if len(b) > 10 else ')')
 
 
+def hidden_foot_segments(segments, conf, X, cfg, fps, min_contact, log, cam):
+    """Contacts for a foot this camera cannot see.  The 2D detector needs a confident ankle, so a foot hidden
+    behind the other (a side view) is never grounded and the balance term then holds the centre of mass over
+    the visible foot alone -- along this camera's depth axis, where the 2D cannot object.  On frames where an
+    ankle's 2D confidence is low and the other foot is grounded, the hidden foot is grounded too if, in
+    MotionBERT's skeleton turned into the lab, it is within hidden_foot_dz_m of the grounded ankle's height and
+    moves less than hidden_foot_speed_m_s relative to it.  Only the skeleton's relative geometry is used, so the
+    placement's depth error cancels.  Returns the segments rebuilt from the merged per-frame verdict."""
+    T = conf.shape[0]
+    ank = [H36M.index('RAnkle'), H36M.index('LAnkle')]
+    g = np.zeros((T, 2), bool)
+    for j, s in segments:
+        g[s, ank.index(j)] = True
+    added = []
+    for f in (0, 1):
+        o = 1 - f
+        rel = X[:, ank[f]] - X[:, ank[o]]
+        dz = np.abs(rel[:, 2])
+        speed = np.r_[0.0, np.linalg.norm(np.diff(rel, axis=0), axis=1)] * fps
+        new = (conf[:, ank[f]] <= cfg['conf_thresh']) & g[:, o] & ~g[:, f] & \
+            (dz < cfg['hidden_foot_dz_m']) & (speed < cfg['hidden_foot_speed_m_s'])
+        g[:, f] |= new
+        added.append(int(new.sum()))
+    out = []
+    for f in (0, 1):
+        i = 0
+        while i < T:
+            if g[i, f]:
+                j0 = i
+                while i < T and g[i, f]:
+                    i += 1
+                if i - j0 >= min_contact:
+                    out.append((ank[f], np.arange(j0, i)))
+            else:
+                i += 1
+    log(f'  {cam}: hidden-foot contact added {added[0]} RAnkle / {added[1]} LAnkle frames (low 2D confidence, '
+        f'other foot grounded, ankles within {1000 * cfg["hidden_foot_dz_m"]:.0f} mm in MotionBERT\'s skeleton)')
+    return out
+
+
 def pnp_init(Jh_m, kp2d, K, dist_cv, use_joint):
     """Rigid PnP per frame on this skeleton.  -> R (T,3,3), t (T,3), ok (T,), frames PnP failed on filled
     from the nearest solved one."""
@@ -248,6 +288,9 @@ def run_camera(user, action, detector, cam, cid, cfg, shapes, device, log):
     min_contact = max(2, int(round(cfg['min_contact_s'] * fps)))
     speed_thr = cfg['foot_speed_px_s'] / fps
     segments = []
+    # MotionBERT's skeleton turned into the lab (rotation only, so the placement's depth error cancels in any
+    # difference of two joints): z is height
+    X_lab_dir = np.einsum('tij,tkj->tki', R0, Jh_m) @ R_cam
     if cfg['w_foot'] > 0 or cfg['w_floor_contact'] > 0 or cfg['w_com'] > 0:
         for jn in ('RAnkle', 'LAnkle'):
             j = H36M.index(jn)
@@ -263,6 +306,12 @@ def run_camera(user, action, detector, cam, cid, cfg, shapes, device, log):
                 jo = H36M.index('LAnkle' if jn == 'RAnkle' else 'RAnkle')
                 above = (conf[:, jo] > cfg['conf_thresh']) & (kp2d[:, j, 1] < kp2d[:, jo, 1] - cfg['foot_lowest_margin_px'])
                 grounded &= ~above
+            if cfg.get('foot_lowest_margin_m', 0.0) > 0:
+                # the same swing-foot veto in 3D: a far foot on a down-looking camera is drawn higher in the
+                # image while flat on the floor (a side view: 38 px on BioCV P03 cam 05), the pixel test then
+                # never grounds it
+                jo = H36M.index('LAnkle' if jn == 'RAnkle' else 'RAnkle')
+                grounded &= ~((X_lab_dir[:, j, 2] - X_lab_dir[:, jo, 2]) > cfg['foot_lowest_margin_m'])
             i = 0
             while i < T:
                 if grounded[i]:
@@ -273,6 +322,8 @@ def run_camera(user, action, detector, cam, cid, cfg, shapes, device, log):
                         segments.append((j, np.arange(j0, i)))
                 else:
                     i += 1
+        if cfg.get('hidden_foot_contact'):
+            segments = hidden_foot_segments(segments, conf, X_lab_dir, cfg, fps, min_contact, log, cam)
         desc = ', '.join(f'{H36M[j]} {s[0] / fps:.2f}-{s[-1] / fps:.2f}s' for j, s in segments) if segments else 'none'
         log(f'  {cam}: foot contact (ankle speed < {speed_thr:.1f} px/frame, >= {min_contact} frames): {desc}')
 
