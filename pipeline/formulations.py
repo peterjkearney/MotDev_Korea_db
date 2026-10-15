@@ -25,12 +25,16 @@ A configuration is one way of turning MotionBERT's pass-1 rotations into a place
     w_foot       grounded ankle keeps a constant horizontal lab position (m^-2; 0 = off)
     w_floor      hinge: no ankle below the lab floor (0 = off)
     w_floor_contact  grounded ankle held AT floor_contact_m above the floor, two-sided (0 = off)
-    floor_contact_m  ankle-joint height above the floor while grounded, metres, or 'mesh': the
-                     configuration's own rest-pose ankle height above its sole (smpl_lite.ankle_height_m)
+    floor_contact_m  ankle-joint height above the floor while grounded, metres, or derived from the configuration's
+                     own body (smpl_lite.ankle_height_m): 'mesh' its rest-pose ankle height above its sole (a true
+                     floor), 'mesh_kp' above its OpenPose toe/heel keypoint vertices (a floor fitted through
+                     triangulated toes and heels, as Korea's GT floor is)
     w_com        hinge: the mesh's centre of mass (uniform density, smpl_lite.body_points) projected on the
                  floor stays within com_margin_m of the convex hull of the grounded feet's sole points
                  (heel, toe, medial, lateral per foot) (m^-2; 0 = off)
     com_margin_m slack outside the base of support before the hinge bites, metres
+    pull_scale   {SMPL-24 joint: multiplier} on w_pull for that joint's pull toward MotionBERT's angle (default 1):
+                 freedom where MotionBERT under-reproduces flexion along the line of sight
     com_support  'any': frames with either foot grounded (one foot's sole alone when single stance);
                  'double': only frames with both feet grounded
 
@@ -51,7 +55,7 @@ BALANCE = dict(w_com=3000.0, com_margin_m=0.03, com_support='any')
 DEFAULTS = dict(shape='motionbert', joints='h36m', placement='ray_const', body=True, exclude_2d='',
                 w_foot=0.0, w_floor=0.0, w_floor_contact=0.0, floor_contact_m=0.025,
                 w_com=0.0, com_margin_m=0.03, com_support='any',
-                w_pull=30.0, w_smooth=30.0, w_trans_acc=1e4, sigma_px=5.0, huber=20.0,
+                w_pull=30.0, pull_scale={}, w_smooth=30.0, w_trans_acc=1e4, sigma_px=5.0, huber=20.0,
                 conf_thresh=0.3, stance_sec=1.5,
                 min_contact_s=0.1, foot_speed_px_s=90.0, foot_lowest_margin_px=30.0,
                 iters_global=60, iters=300)
@@ -91,6 +95,11 @@ CHAIN = {
                 note='C11 on SMPL-24 joints: hips at the femoral head (fit, 2D term, output)'),
     'C13': dict(shape='kid_s24g', joints='smpl24', placement='ray_const', body=True, exclude_2d=HEAD, **FLOOR, **CONTACT,
                 note='C12 with a girth prior instead of the betas 1-9 ridge'),
+    # feet held firmly at the body's own ankle height, centre of mass pulled over the feet: MotionBERT
+    # under-reproduces lean along the line of sight (55-90% of it), which the 2D cannot see
+    'C14': dict(shape='kid_s24', joints='smpl24', placement='ray_const', body=True, exclude_2d=HEAD, **FLOOR,
+                w_floor_contact=3e4, floor_contact_m='mesh_kp', w_com=1e4, com_margin_m=0.0, com_support='any',
+                note='C12 + firm feet at the mesh ankle height (above its toe/heel keypoints) + balance'),
 }
 
 # one component removed from the child recipe at a time

@@ -329,16 +329,30 @@ class MiniSMPL:
         return A
 
 
-def ankle_height_m(shape, joints='h36m'):
-    """Rest-pose height of the H36M-17 ankle joints above the sole (the lowest vertex), metres,
-    mean of left and right: where a grounded ankle sits above a barefoot floor for this body."""
+# OpenPose BODY_25 foot keypoints as SMPL vertices (smplx's vertex_ids, SMPL/SMPL-H topology)
+OPENPOSE_FOOT_VERTICES = {'LBigToe': 3216, 'LSmallToe': 3226, 'LHeel': 3387,
+                          'RBigToe': 6617, 'RSmallToe': 6624, 'RHeel': 6787}
+
+
+def ankle_height_m(shape, joints='h36m', ref='sole'):
+    """Rest-pose height of the H36M-17 ankle joints, metres, mean of left and right: where a grounded ankle
+    sits above the floor for this body.  ref 'sole': above the lowest vertex (a barefoot floor).  ref
+    'foot_kp': above the mean height of the mesh's OpenPose toe/heel keypoint vertices -- the floor as
+    Korea's build_child_gt fits it (a plane through triangulated BODY_25 toes and heels, which sit ~10 mm
+    above the sole on a child), and unchanged by shoes, which raise the keypoints with the ankle."""
     import torch
     smpl = MiniSMPL(shape, full=True, joints=joints)
     with torch.no_grad():
         v = smpl.vertices(torch.eye(3, dtype=torch.float64).expand(1, 24, 3, 3))[0]
         Jh = smpl.Jh @ v
     y = v[:, 1]                                                  # SMPL rest frame is y-up
-    return float(np.mean([Jh[H36M.index(j), 1] - y.min() for j in ('RAnkle', 'LAnkle')]))
+    if ref == 'sole':
+        base = y.min()
+    elif ref == 'foot_kp':
+        base = y[list(OPENPOSE_FOOT_VERTICES.values())].mean()
+    else:
+        raise ValueError(f'unknown ref {ref!r}')
+    return float(np.mean([Jh[H36M.index(j), 1] - base for j in ('RAnkle', 'LAnkle')]))
 
 
 SOLE = ['RHeel', 'RToe', 'RMedial', 'RLateral', 'LHeel', 'LToe', 'LMedial', 'LLateral']

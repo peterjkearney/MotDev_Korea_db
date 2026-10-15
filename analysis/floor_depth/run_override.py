@@ -4,6 +4,7 @@
 
     --set KEY=VALUE[,KEY=VALUE]   applied to every --configs entry (floats parsed; 'BALANCE' adds the
                                   formulations.BALANCE terms)
+                                  dict values as joint:scale|joint:scale (pull_scale=Spine1:0.1|L_Hip:0.1)
     --contact planted             floor_contact_m = the subject's median planted-ankle height (its targets)
 
 Point BIOCV_OUT at a COPY of the output tree: results are written under the configuration's own id, so they
@@ -34,6 +35,9 @@ def parse_set(spec):
             out.update(formulations.BALANCE)
             continue
         k, v = item.split('=', 1)
+        if ':' in v:                                                  # dict: joint:scale|joint:scale
+            out[k] = {kk: float(vv) for kk, vv in (pair.split(':') for pair in v.split('|'))}
+            continue
         try:
             out[k] = float(v)
         except ValueError:

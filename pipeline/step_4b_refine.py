@@ -141,8 +141,11 @@ def run_camera(user, action, detector, cam, cid, cfg, shapes, device, log):
     smpl = MiniSMPL(shape, device, joints=cfg['joints'])
     f64 = dict(dtype=torch.float64, device=device)
     moments = torch.tensor(body_points(shape), **f64)            # row 0 COM, rows 1-8 sole points (SOLE)
-    # floor_contact_m 'mesh': this body's own ankle height above its sole, at the placement scale
-    contact_m = (ankle_height_m(shape, cfg['joints']) * scale if cfg['floor_contact_m'] == 'mesh' else float(cfg['floor_contact_m']))
+    # floor_contact_m 'mesh' / 'mesh_kp': this body's own ankle height above its sole / above its OpenPose
+    # toe-heel keypoints (the floor Korea's GT is fitted to), at the placement scale
+    fc = cfg['floor_contact_m']
+    contact_m = (ankle_height_m(shape, cfg['joints'], ref={'mesh': 'sole', 'mesh_kp': 'foot_kp'}[fc]) * scale
+                 if fc in ('mesh', 'mesh_kp') else float(fc))
     if cfg['w_floor_contact'] > 0:
         log(f'  {cam}: grounded ankle held at {1000 * contact_m:.0f} mm above the floor ({cfg["floor_contact_m"]})')
     rot0_t = torch.tensor(rot0, **f64)
@@ -296,6 +299,11 @@ def run_camera(user, action, detector, cam, cid, cfg, shapes, device, log):
     dg = torch.zeros(T, 3, **f64, requires_grad=True)
     dt = torch.zeros(T, 3, **f64, requires_grad=True)
     db = torch.zeros(T, 23, 3, **f64, requires_grad=True)
+    # per-joint pull toward MotionBERT's angles: w_pull x pull_scale[joint] (default 1)
+    unknown = set(cfg.get('pull_scale') or {}) - set(SMPL24[1:])
+    if unknown:
+        raise ValueError(f'pull_scale: unknown SMPL-24 joint(s) {sorted(unknown)}')
+    pull_w = torch.tensor([float((cfg.get('pull_scale') or {}).get(j, 1.0)) for j in SMPL24[1:]], **f64)
     scale_t = float(scale)
     sig, hub = cfg['sigma_px'], cfg['huber']
 
@@ -351,7 +359,7 @@ def run_camera(user, action, detector, cam, cid, cfg, shapes, device, log):
         r = (project(X, K_t, dist_cv) - obs) / sig
         rho = hub ** 2 * (torch.sqrt(1 + (r / hub) ** 2) - 1)
         e_rep = (W[..., None] * rho).sum()
-        e_pull = cfg['w_pull'] * (db ** 2).sum() if use_body else torch.zeros((), **f64)
+        e_pull = cfg['w_pull'] * (pull_w[None, :, None] * db ** 2).sum() if use_body else torch.zeros((), **f64)
         e_sm = cfg['w_smooth'] * ((db[1:] - db[:-1]) ** 2).sum() if use_body else torch.zeros((), **f64)
         e_sm = e_sm + cfg['w_smooth'] * ((dg[1:] - dg[:-1]) ** 2).sum()
         tr = t0_t + dt
