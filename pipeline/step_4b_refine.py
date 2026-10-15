@@ -5,8 +5,10 @@ step_4 is one recipe: MotionBERT's shape, rescaled to the stature, placed rigidl
 frame.  This runs the configurations in formulations.py, each a different combination of
 
     shape        MotionBERT's betas | adult SMPL fitted to bone lengths | kid blend | cohort kid (each fitted
-                 with or without the hip/shoulder widths, _nw, or on SMPL-24 joints, _s24, + girth prior, _s24g)
-    joints       the model's H36M-17 joints: the H36M regressor, or rebuilt from SMPL's 24 joints
+                 with or without the hip/shoulder widths, _nw, or on SMPL-24 joints, _s24, + girth prior, _s24g,
+                 or on OpenPose-style joints, _opg / _opgw, hip/shoulder offsets only _hsg / _hsgw)
+    joints       the model's H36M-17 joints: the H36M regressor, rebuilt from SMPL's 24 joints, or those + the
+                 calibrated OpenPose offsets ('op', or hips/shoulders only 'op_hs')
     placement    rigid PnP | frozen ray rotation with the translation solved | free rotation
     body         MotionBERT's joint angles kept, or refined against the 2D (SMPLify-style,
                  L-BFGS over the whole trial: robust reprojection + pull toward MotionBERT +
@@ -83,7 +85,9 @@ class Shapes:
             b = np.load(final_betas_path(user, action, detector, cam), allow_pickle=True)['betas'].ravel()[:10].astype(np.float64)
             h = mesh_height_m(self.lin[10], b)
             return b, self.stature(user) / h, h, f"MotionBERT betas, rescaled x{self.stature(user) / h:.3f} to {self.stature(user):.2f} m"
-        if name in ('adult', 'kid', 'adult_nw', 'kid_nw', 'adult_s24', 'kid_s24', 'adult_s24g', 'kid_s24g'):
+        if name in ('adult', 'kid', 'adult_nw', 'kid_nw', 'adult_s24', 'kid_s24', 'adult_s24g', 'kid_s24g',
+                    'adult_opg', 'kid_opg', 'adult_opgw', 'kid_opgw', 'adult_hsg', 'kid_hsg', 'adult_hsgw', 'kid_hsgw',
+                    'adult_hwg', 'kid_hwg'):
             p = shapes_path(user)
             if not os.path.exists(p):
                 raise FileNotFoundError(f'{p} -- run step_2c_fit_shape.py first')
@@ -91,7 +95,8 @@ class Shapes:
             if name not in z.files:
                 raise FileNotFoundError(f'{p} has no {name!r} -- rerun step_2c_fit_shape.py --force')
             b = z[name].astype(np.float64)
-        elif name in ('cohort_kid', 'cohort_kid_nw', 'cohort_kid_s24', 'cohort_kid_s24g'):
+        elif name in ('cohort_kid', 'cohort_kid_nw', 'cohort_kid_s24', 'cohort_kid_s24g', 'cohort_kid_opg',
+                      'cohort_kid_opgw', 'cohort_kid_hsg', 'cohort_kid_hsgw', 'cohort_kid_hwg'):
             p = cohort_shapes_path()
             if not os.path.exists(p):
                 raise FileNotFoundError(f'{p} -- run step_2c_fit_shape.py --cohort first')

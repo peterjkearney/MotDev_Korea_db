@@ -11,9 +11,15 @@ A configuration is one way of turning MotionBERT's pass-1 rotations into a place
                  'adult_s24', 'kid_s24', 'cohort_kid_s24'   the _nw fit on SMPL-24 joints (run with joints='smpl24')
                  'adult_s24g', 'kid_s24g', 'cohort_kid_s24g'  the same with a girth prior in place of the
                                betas 1-9 ridge (proportions free, girth at the mean for the size)
+                 'adult_opg', 'kid_opg', 'cohort_kid_opg'   the _s24g fit on OpenPose-style joints (run with joints='op');
+                               _opgw with the hip and shoulder widths back in; _hsg / _hsgw the same on joints='op_hs'
     joints       'h36m'        the model's H36M-17 joints from MotionBERT's H36M regressor (hips up on the pelvis)
                  'smpl24'      rebuilt from SMPL's own 24 joints (smpl_lite.joint_regressor): used for PnP, the 2D
                                term, the floor contact and the scored output
+                 'op'          SMPL-24 joints + per-joint offsets carried by their bones, calibrated on BioCV
+                               (smpl_lite.OP_OFFSETS_MM): the points OpenPose detects, not joint centres
+                 'op_hs'       only the hip and shoulder offsets across the body (lateral, forward): the along-limb
+                               offsets carry BioCV mocap's joint-centre conventions (smpl_lite.OP_SETS)
     placement    'pnp'         step_4's rigid PnP per frame + RTS root smoothing; no refinement
                  'ray_const'   per-frame ray rotation (MotionBERT orientation + off-axis correction)
                                + one constant per trial from PnP; translation solved
@@ -66,6 +72,11 @@ DEFAULTS = dict(shape='motionbert', joints='h36m', placement='ray_const', body=T
                 min_contact_s=0.1, foot_speed_px_s=90.0, foot_lowest_margin_px=30.0,
                 iters_global=60, iters=300)
 
+# C14, the current child recipe, which C15-C17 vary
+_C14 = dict(shape='kid_s24g', joints='smpl24', placement='ray_const', body=True, exclude_2d=HEAD, **FLOOR,
+            w_floor_contact=3e4, floor_contact_m='mesh_kp', w_com=1e4, com_margin_m=0.0, com_support='any',
+            hidden_foot_contact=True, foot_lowest_margin_px=0.0, foot_lowest_margin_m=0.03)
+
 CHAIN = {
     # the original pipeline and its hip fix
     'C0': dict(shape='motionbert', placement='pnp', body=False, exclude_2d='',
@@ -103,11 +114,16 @@ CHAIN = {
                 note='C12 with a girth prior instead of the betas 1-9 ridge'),
     # feet held firmly at the body's own ankle height, centre of mass pulled over the feet: MotionBERT
     # under-reproduces lean along the line of sight (55-90% of it), which the 2D cannot see
-    'C14': dict(shape='kid_s24g', joints='smpl24', placement='ray_const', body=True, exclude_2d=HEAD, **FLOOR,
-                w_floor_contact=3e4, floor_contact_m='mesh_kp', w_com=1e4, com_margin_m=0.0, com_support='any',
-                hidden_foot_contact=True, foot_lowest_margin_px=0.0, foot_lowest_margin_m=0.03,
+    'C14': dict(_C14,
                 note='SMPL-24 joints, girth-prior shape, firm feet at the mesh ankle height (above its toe/heel '
                      'keypoints), balance, hidden feet grounded from the skeleton'),
+    # model hips and shoulders where OpenPose puts them (across the body only): the fit, the 2D term, the contact
+    # and the output compare like with like.  C12 left hips 26 mm narrow and 15-19 mm behind the target
+    'C15': dict(_C14, shape='kid_hsg', joints='op_hs',
+                note='C14 with OpenPose-style hips/shoulders (SMPL-24 + calibrated offsets across the body)'),
+    'C16': dict(_C14, shape='kid_hsgw', joints='op_hs', note='C15 with the hip and shoulder widths in the shape fit'),
+    'C17': dict(_C14, shape='kid_opg', joints='op', note='C14 on fully OpenPose-style joints (every offset)'),
+    'C18': dict(_C14, shape='kid_hwg', joints='op_hw', note='C14 with the hips widened to OpenPose\'s (lateral offset only)'),
 }
 
 # one component removed from the child recipe at a time

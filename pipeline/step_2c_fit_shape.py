@@ -18,13 +18,19 @@ so the model's thigh is the target's thigh.  step_4b runs these with joints='smp
 adult_s24g / kid_s24g replace the _s24 ridge (which pins proportions with girth) with a girth prior:
 hip, waist and chest girth held to the mean body of the same size and kid weight (--sigma-girth-mm),
 betas 1-9 under a light ridge (--lam-rest-girth) so they can fit the torso and limb proportions.
+adult_opg / kid_opg are the _s24g fits with OpenPose-style model joints (smpl_lite joints='op': SMPL-24 joint +
+per-joint offset calibrated on BioCV, lengths measured standing with the arms down), so the fitted body's
+anatomical bones are what OpenPose's lengths imply; _hsg the same with only the hip and shoulder offsets across
+the body (joints='op_hs').  _opgw / _hsgw add the hip and shoulder widths back (fair evidence once the model's
+joints follow OpenPose's definition).  step_4b runs these with joints='op' / 'op_hs'.
 
 The segment lengths (utils/smpl_lite.SEGMENTS) are medians over every frame of every laid-out rep
 of the subject, in the target's own units (mm), so the fitted body is metric and step_4b does not
 rescale it.  Nothing here depends on the detector: the target is the triangulated OpenPose skeleton.
 
     reads   {OUT_DIR}/{user}/{action}/Analysis/H36M/openpose_tri_h36m.npz   (every rep of the subject)
-    writes  {OUT_DIR}/{user}/shapes.npz                                     adult (10,), kid (11,), adult_nw, kid_nw, adult_s24, kid_s24, adult_s24g, kid_s24g, fit residuals
+    writes  {OUT_DIR}/{user}/shapes.npz                                     adult (10,), kid (11,), adult_nw, kid_nw, adult_s24, kid_s24, adult_s24g, kid_s24g,
+                                                                            adult/kid_opg, _opgw, _hsg, _hsgw, fit residuals
 
 --cohort, after every subject is fitted: the median kid shape over subjects, for the
 'cohort_kid' configuration (the version a single-camera product could use, having no
@@ -56,7 +62,7 @@ def subjects_with_targets(user=None):
     return out
 
 
-def fit_subject(user, targets, lin_adult, lin_kid, lin_adult24, lin_kid24, rings_adult, rings_kid, args):
+def fit_subject(user, targets, lin_adult, lin_kid, lin_adult24, lin_kid24, lin_op, rings_adult, rings_kid, args):
     kps = []
     for p in targets:
         z = np.load(p, allow_pickle=True)
@@ -77,6 +83,16 @@ def fit_subject(user, targets, lin_adult, lin_kid, lin_adult24, lin_kid24, rings
     adult_s24g, rms_a24g = fit_betas(lin_adult24, tgt_nw, SEGMENTS_NO_WIDTH, girth=rings_adult, **gfit)
     kid_s24g, rms_k24g = fit_betas(lin_kid24, tgt_nw, SEGMENTS_NO_WIDTH, girth=rings_kid, **gfit)
     kid_g = girths_mm(lin_kid24, kid_s24g, rings_kid)
+    op = {}
+    for tag, joints, segs, t in (('opg', 'op', SEGMENTS_NO_WIDTH, tgt_nw), ('opgw', 'op', SEGMENTS, tgt),
+                                 ('hsg', 'op_hs', SEGMENTS_NO_WIDTH, tgt_nw), ('hsgw', 'op_hs', SEGMENTS, tgt),
+                                 ('hwg', 'op_hw', SEGMENTS_NO_WIDTH, tgt_nw)):
+        for body, lin, rings in (('adult', lin_op[joints, False], rings_adult), ('kid', lin_op[joints, True], rings_kid)):
+            b, rms = fit_betas(lin, t, segs, girth=rings, **gfit)
+            op[f'{body}_{tag}'] = b.astype(np.float32)
+            op[f'{body}_{tag}_rms_mm'] = rms
+            op[f'{body}_{tag}_height_m'] = mesh_height_m(lin, b)
+            op[f'{body}_{tag}_fit_mm'] = seg_lengths_mm(lin, b, segs)
     adult_nw, rms_anw = fit_betas(mid_adult, tgt_nw, SEGMENTS_NO_WIDTH, lam=args.lam, sigma_mm=args.sigma_mm,
                                   lam_rest=args.lam_rest)
     kid_nw, rms_knw = fit_betas(mid_kid, tgt_nw, SEGMENTS_NO_WIDTH, lam=args.lam, sigma_mm=args.sigma_mm,
@@ -105,21 +121,24 @@ def fit_subject(user, targets, lin_adult, lin_kid, lin_adult24, lin_kid24, rings
              adult_s24g_fit_mm=seg_lengths_mm(lin_adult24, adult_s24g, SEGMENTS_NO_WIDTH),
              kid_s24g_fit_mm=seg_lengths_mm(lin_kid24, kid_s24g, SEGMENTS_NO_WIDTH),
              kid_s24g_girth_mm=np.array([kid_g[k] for k in kid_g]), girth_names=np.array(list(kid_g)),
-             lam_rest_girth=args.lam_rest_girth, sigma_girth_mm=args.sigma_girth_mm,
+             lam_rest_girth=args.lam_rest_girth, sigma_girth_mm=args.sigma_girth_mm, **op,
              n_reps=len(targets), n_frames=int(np.isfinite(kps).all(-1).any(-1).sum()),
              lam=args.lam, sigma_mm=args.sigma_mm, source=np.array('openpose_tri_h36m.npz, all-camera, every rep'))
     return (f'{len(targets)} reps, {int(n.max())} frames: adult betas max |{np.abs(adult).max():.1f}| RMS {rms_a:.1f} mm; '
             f'kid weight {kid[-1]:.2f}, betas max |{np.abs(kid[:-1]).max():.1f}|, RMS {rms_k:.1f} mm; '
             f'no widths: kid weight {kid_nw[-1]:.2f}, RMS {rms_knw:.1f} mm; '
             f'SMPL-24 joints: kid weight {kid_s24[-1]:.2f}, RMS {rms_k24:.1f} mm; '
-            f'+ girth prior: kid weight {kid_s24g[-1]:.2f}, RMS {rms_k24g:.1f} mm, waist {kid_g["waist"]:.0f} mm')
+            f'+ girth prior: kid weight {kid_s24g[-1]:.2f}, RMS {rms_k24g:.1f} mm, waist {kid_g["waist"]:.0f} mm; '
+            + '; '.join(f'{k}: kid weight {op["kid_" + k][-1]:.2f}, RMS {op["kid_" + k + "_rms_mm"]:.1f} mm'
+                        for k in ('opg', 'opgw', 'hsg', 'hsgw', 'hwg')))
 
 
 def cohort(args):
     files = sorted(glob.glob(shapes_path('*')))
     if not files:
         raise SystemExit(f'no {{user}}/shapes.npz under {OUT_DIR} -- fit the subjects first')
-    subs, kids, adults, more = [], [], [], {'kid_nw': [], 'kid_s24': [], 'kid_s24g': []}
+    subs, kids, adults, more = [], [], [], {'kid_nw': [], 'kid_s24': [], 'kid_s24g': [], 'kid_opg': [], 'kid_opgw': [], 'kid_hsg': [],
+                                            'kid_hsgw': [], 'kid_hwg': []}
     for p in files:
         z = np.load(p, allow_pickle=True)
         subs.append(os.path.basename(os.path.dirname(p)))
@@ -174,11 +193,14 @@ def main():
         return
     lin_adult, lin_kid = load_linear(10), load_linear(10, kid=True)
     lin_adult24, lin_kid24 = load_linear(10, joints='smpl24'), load_linear(10, kid=True, joints='smpl24')
+    lin_op = {(j, k): load_linear(10, kid=k, joints=j) for j in ('op', 'op_hs', 'op_hw') for k in (False, True)}
     rings_adult, rings_kid = girth_rings(lin_adult24, np.zeros(10)), girth_rings(lin_kid24, np.r_[np.zeros(10), 0.5])
     n_ok, failed = 0, []
     for u in todo:
         try:
-            print(f'{u}: {fit_subject(u, subs[u], lin_adult, lin_kid, lin_adult24, lin_kid24, rings_adult, rings_kid, args)}', flush=True)
+            msg = fit_subject(u, subs[u], lin_adult, lin_kid, lin_adult24, lin_kid24, lin_op, rings_adult,
+                              rings_kid, args)
+            print(f'{u}: {msg}', flush=True)
             n_ok += 1
         except Exception as e:
             failed.append(u)

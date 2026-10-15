@@ -105,16 +105,97 @@ def load_h36m_regressor():
 SMPL24_FOR_H36M = {'RHip': 'R_Hip', 'RKnee': 'R_Knee', 'RAnkle': 'R_Ankle', 'LHip': 'L_Hip', 'LKnee': 'L_Knee',
                    'LAnkle': 'L_Ankle', 'LShoulder': 'L_Shoulder', 'LElbow': 'L_Elbow', 'LWrist': 'L_Wrist',
                    'RShoulder': 'R_Shoulder', 'RElbow': 'R_Elbow', 'RWrist': 'R_Wrist'}
-JOINTS = ('h36m', 'smpl24')
+JOINTS = ('h36m', 'smpl24', 'op', 'op_hs', 'op_hw')
+
+# OpenPose-style joints ('op'): the SMPL-24 joint plus a per-joint offset carried rigidly by one SMPL bone.
+# OpenPose keypoints are not joint centres; calibrated on BioCV (analysis/joint_calib/op_offsets.py: 9-camera
+# triangulated OpenPose minus mocap joint centres, P03/P04/P06, CMJ/hop/run, 2026-10-15; P03/P04/P06/P08/P09), median per subject in
+# the segment frame below, L/R pooled, mean over subjects.  (lateral, up, forward) mm at OP_SIZE_MM; lateral is
+# away from the midline, "up" for a limb segment is along it towards the proximal joint.  Offsets scale with
+# the body's rest-pose Thorax-to-ankle height (mocap trunk + thigh + shank on the calibration subjects, 1331-1480).
+OP_SIZE_MM = 1423.0
+OP_OFFSETS_MM = {'Hip': (24.8, -12.4, -26.2), 'Knee': (2.7, 14.4, -6.7), 'Ankle': (6.3, -8.2, -2.7),
+                 'Shoulder': (33.8, -19.8, 3.7), 'Elbow': (0.5, 16.2, 9.1), 'Wrist': (-8.3, 21.1, -9.3)}
+# Joint sets: 'op' every offset.  'op_hs' only the hip and shoulder offsets ACROSS the body (lateral, forward):
+# the along-limb parts measure BioCV mocap's joint-centre conventions as much as OpenPose (mocap's thigh/shank
+# ratio is 1.09-1.13 where SMPL-24's and de Leva's are ~0.96), so adding them to SMPL-24 over-corrects
+# (shape fit RMS 21 -> 41 mm on P03); the across-body parts do not depend on bone length.
+OP_SETS = {'op': OP_OFFSETS_MM,
+           'op_hs': {'Hip': (OP_OFFSETS_MM['Hip'][0], 0.0, OP_OFFSETS_MM['Hip'][2]),
+                     'Shoulder': (OP_OFFSETS_MM['Shoulder'][0], 0.0, OP_OFFSETS_MM['Shoulder'][2])},
+           'op_hw': {'Hip': (OP_OFFSETS_MM['Hip'][0], 0.0, 0.0)}}
+# the frame each offset was measured in, and the SMPL bone that carries it (its global rotation, {s} = L/R)
+OP_FRAME = {'Hip': 'pelvis', 'Knee': 'thigh', 'Ankle': 'shank', 'Shoulder': 'thorax', 'Elbow': 'upperarm',
+            'Wrist': 'forearm'}
+OP_BONE = {'pelvis': 'Pelvis', 'thorax': 'Spine3', 'thigh': '{s}_Hip', 'shank': '{s}_Knee',
+           'upperarm': '{s}_Shoulder', 'forearm': '{s}_Elbow'}
+OP_SEG = {'thigh': ('Hip', 'Knee'), 'shank': ('Knee', 'Ankle'), 'upperarm': ('Shoulder', 'Elbow'),
+          'forearm': ('Elbow', 'Wrist')}
+
+
+def _unit(v):
+    return v / np.linalg.norm(v)
+
+
+def _segment_frame(j, frame, side):
+    """Rows x, y, z of a segment frame from H36M-17 joints j (17,3), as op_offsets.py builds it from mocap:
+    pelvis / thorax x = right->left, y = Hip->Thorax made orthogonal, z = x cross y (forward); a limb's
+    y = distal->proximal, the other axes from the pelvis (legs) or thorax (arms) frame made orthogonal."""
+    def orth(v, a):
+        return _unit(v - (v @ a) * a)
+    up = j[J['Thorax']] - j[J['Hip']]
+    xp = _unit(j[J['LHip']] - j[J['RHip']])
+    xt = _unit(j[J['LShoulder']] - j[J['RShoulder']])
+    if frame in ('pelvis', 'thorax'):
+        x = xp if frame == 'pelvis' else xt
+        y = orth(up, x)
+        return np.stack([x, y, np.cross(x, y)])
+    a, b = OP_SEG[frame]
+    y = _unit(j[J[side + a]] - j[J[side + b]])
+    if frame in ('thigh', 'shank'):
+        x = orth(xp, y)
+        return np.stack([x, y, np.cross(x, y)])
+    z = orth(np.cross(xt, orth(up, xt)), y)
+    return np.stack([np.cross(y, z), y, z])
+
+
+def op_offsets(joints='op'):
+    """(17,24,3) metres at OP_SIZE_MM: the rest-pose offset of each H36M-17 joint from its SMPL-24 base point,
+    split over the bones that carry it (posed offset = sum_k R_k @ M[j,k], R_k bone k's global rotation).
+    Hip / Thorax / Spine are the midpoints the targets build, so they carry halves of their joints' offsets.
+    Directions are fixed from the mean adult's rest pose (T-pose arms: an arm's lateral is rest-pose up)."""
+    m = _load_pkl()
+    Jr = m['J_regressor']
+    Jr = Jr.toarray() if sp.issparse(Jr) else np.asarray(Jr, dtype=np.float64)
+    j = joint_regressor('smpl24') @ np.asarray(m['v_template'], dtype=np.float64)
+    M = np.zeros((17, 24, 3))
+    for jn, loc in OP_SETS[joints].items():
+        f = OP_FRAME[jn]
+        for s in 'LR':
+            local = np.array(loc) / 1000.0
+            if s == 'R':
+                local[0] *= -1                                          # lateral = -x on the right
+            M[J[s + jn], SMPL24.index(OP_BONE[f].format(s=s))] = _segment_frame(j, f, s).T @ local
+    for c, (a, b) in (('Hip', ('RHip', 'LHip')), ('Thorax', ('RShoulder', 'LShoulder'))):
+        M[J[c]] = 0.5 * (M[J[a]] + M[J[b]])
+    M[J['Spine']] = 0.5 * (M[J['Hip']] + M[J['Thorax']])
+    return M
+
+
+def op_size(j24):
+    """Rest-pose Thorax-to-ankle height (metres) from SMPL-24 joints (...,24,3), y-up: what OP_OFFSETS_MM scale by."""
+    sh = 0.5 * (j24[..., SMPL24.index('L_Shoulder'), 1] + j24[..., SMPL24.index('R_Shoulder'), 1])
+    return sh - 0.5 * (j24[..., SMPL24.index('L_Ankle'), 1] + j24[..., SMPL24.index('R_Ankle'), 1])
 
 
 def joint_regressor(joints='h36m'):
     """(17,6890) vertex regressor for the H36M-17 layout: 'h36m' the mesh checkpoint's H36M regressor,
-    'smpl24' the layout rebuilt from SMPL's J_regressor (SMPL24_FOR_H36M)."""
+    'smpl24' the layout rebuilt from SMPL's J_regressor (SMPL24_FOR_H36M).  'op' regresses the same points
+    as 'smpl24' (so does 'op_hs'): their offsets (op_offsets) are added by load_linear and MiniSMPL."""
     Jh = load_h36m_regressor()
     if joints == 'h36m':
         return Jh
-    if joints != 'smpl24':
+    if joints not in ('smpl24',) + tuple(OP_SETS):
         raise ValueError(f'unknown joints {joints!r} (one of {JOINTS})')
     Jr = _load_pkl()['J_regressor']
     Jr = Jr.toarray() if sp.issparse(Jr) else np.asarray(Jr, dtype=np.float64)
@@ -133,16 +214,46 @@ def kid_shapedir(v_template):
 
 
 # ----------------------------------------------------------------------------- linear model (numpy)
+# the pose OpenPose-style joints are fitted in (load_linear): standing, arms down -- SMPL shoulder rotations
+# about z, degrees (L negative brings the T-pose arm down)
+FIT_POSE_SHOULDER_DEG = 80.0
+
+
+def fit_pose_rotmats():
+    """(24,3,3) local rotations of FIT_POSE: identity but the shoulders."""
+    R = np.tile(np.eye(3), (24, 1, 1))
+    for name, sgn in (('L_Shoulder', -1.0), ('R_Shoulder', 1.0)):
+        a = np.radians(sgn * FIT_POSE_SHOULDER_DEG)
+        R[SMPL24.index(name)] = [[np.cos(a), -np.sin(a), 0], [np.sin(a), np.cos(a), 0], [0, 0, 1]]
+    return R
+
+
 def load_linear(n_betas=10, kid=False, joints='h36m'):
     """v_t (6890,3), S (6890,3,n), J0 (17,3), A (17,3,n): rest-pose vertices / H36M-17 joints linear in shape
-    (joints: see joint_regressor)."""
+    (joints: see joint_regressor; the OpenPose-style sets are posed in FIT_POSE, see below)."""
     m = _load_pkl()
     v_t = np.asarray(m['v_template'], dtype=np.float64)
     S = np.asarray(m['shapedirs'], dtype=np.float64)[:, :, :n_betas]
     if kid:
         S = np.concatenate([S, kid_shapedir(v_t)[:, :, None]], axis=2)
     Jr = joint_regressor(joints)
-    return dict(v_t=v_t, S=S, J0=Jr @ v_t, A=np.einsum('jv,vck->jck', Jr, S), kid=kid, n_betas=n_betas, joints=joints)
+    J0, A = Jr @ v_t, np.einsum('jv,vck->jck', Jr, S)
+    if joints in OP_SETS:
+        # OpenPose-style joints are not on the rotation centres, so their segment lengths depend on the pose: the
+        # T-pose would turn the shoulders' lateral offset along the upper arm.  They are measured in FIT_POSE
+        # (standing, arms down, as most target frames are) on the skinned model step_4b uses (MiniSMPL: joints
+        # regressed from skinned vertices, which also lowers the shoulders ~13 mm as the arm comes down).  With
+        # the pose fixed, skinning is affine in shape, so the shape basis is exact.
+        import torch
+        rm = torch.tensor(fit_pose_rotmats())[None]
+        n = S.shape[-1]
+
+        def posed(x):
+            with torch.no_grad():
+                return MiniSMPL(x, joints=joints).forward(rm)[1][0].numpy()
+        J0 = posed(np.zeros(n))
+        A = np.stack([posed(np.eye(n)[k]) - J0 for k in range(n)], -1)
+    return dict(v_t=v_t, S=S, J0=J0, A=A, kid=kid, n_betas=n_betas, joints=joints)
 
 
 def midpoint_centres(lin):
@@ -287,14 +398,21 @@ class MiniSMPL:
         self.parents[0] = -1
         self.J_rest = self.Jr @ self.v_shaped
         self.n = len(idx)
+        self.op_M = None                                       # 'op': per-bone joint offsets at this body's size
+        if joints in OP_SETS:
+            self.op_M = torch.tensor(op_offsets(joints) * float(op_size(self.J_rest.cpu().numpy())) / (OP_SIZE_MM / 1000.0),
+                                     **f64)
 
     def forward(self, rotmats, moments=None):
-        """rotmats (T,24,3,3) -> SMPL-24 joints (T,24,3), H36M joints (T,17,3); metres, SMPL's frame.
+        """rotmats (T,24,3,3) -> SMPL-24 joints (T,24,3), H36M joints (T,17,3) ('op': + offsets carried by
+        their bones); metres, SMPL's frame.
         moments (P,24,4) (see body_points) adds a third output: those P skinned points (T,P,3)."""
         import torch
         A = self.bone_transforms(rotmats)
         v = self.vertices(rotmats, A)
         J24, Jh = torch.einsum('jn,tnc->tjc', self.Jr, v), torch.einsum('jn,tnc->tjc', self.Jh, v)
+        if self.op_M is not None:
+            Jh = Jh + torch.einsum('tkic,jkc->tji', A[:, :, :3, :3], self.op_M)
         if moments is None:
             return J24, Jh
         return J24, Jh, torch.einsum('pkj,tkij->tpi', moments, A[:, :, :3, :])
@@ -343,8 +461,9 @@ def ankle_height_m(shape, joints='h36m', ref='sole'):
     import torch
     smpl = MiniSMPL(shape, full=True, joints=joints)
     with torch.no_grad():
-        v = smpl.vertices(torch.eye(3, dtype=torch.float64).expand(1, 24, 3, 3))[0]
-        Jh = smpl.Jh @ v
+        eye = torch.eye(3, dtype=torch.float64).expand(1, 24, 3, 3)
+        v = smpl.vertices(eye)[0]
+        Jh = smpl.forward(eye)[1][0]
     y = v[:, 1]                                                  # SMPL rest frame is y-up
     if ref == 'sole':
         base = y.min()
