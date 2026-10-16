@@ -76,6 +76,15 @@ def coco2h36m(kp_coco, conf):
 _TRACKER_CFG = os.path.join(_SCRIPT_DIR, 'botsort_custom.yaml')
 
 
+def _precision_kwargs(half):
+    """FP16/FP32 inference kwargs for model.track. Newer ultralytics (8.4.80+) replaced half=
+    with quantize= and warns on every call that passes half, so use whichever this install knows."""
+    from ultralytics.cfg import DEFAULT_CFG_DICT
+    if 'quantize' in DEFAULT_CFG_DICT:
+        return {'quantize': 16 if half else 32}
+    return {'half': half}
+
+
 def _read_kept_frames(cap, keep_idx, last, q, stop):
     """Reader thread: decode frames 0..last and queue the kept ones, so decoding overlaps
     YOLO on the GPU instead of alternating with it (cv2 releases the GIL while decoding).
@@ -119,12 +128,13 @@ def yolo_track_all_individuals(video_path, model, source_frame_idx, half=True):
     history = {}
     kept_frames = 0
 
+    precision = _precision_kwargs(half)
     q, stop = queue.Queue(maxsize=32), threading.Event()
     reader = threading.Thread(target=_read_kept_frames, args=(cap, keep_idx, n_frames, q, stop), daemon=True)
     reader.start()
     try:
         while (frame := q.get()) is not None:
-            r = model.track(frame, persist=True, verbose=False, half=half, tracker=_TRACKER_CFG)[0]
+            r = model.track(frame, persist=True, verbose=False, tracker=_TRACKER_CFG, **precision)[0]
 
             if r.boxes.id is not None:
                 ids  = r.boxes.id.int().cpu().numpy()      # (n,)
