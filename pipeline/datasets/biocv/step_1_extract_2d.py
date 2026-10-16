@@ -17,7 +17,11 @@ Run inside the motor-dev container:
 
 import os
 import glob
+import queue
 import argparse
+import threading
+import concurrent.futures as cf
+import multiprocessing as mp
 
 import numpy as np
 import cv2
@@ -69,7 +73,30 @@ def coco2h36m(kp_coco, conf):
     return kp_h36m
 
 
-def yolo_track_all_individuals(video_path, model, source_frame_idx):
+_TRACKER_CFG = os.path.join(_SCRIPT_DIR, 'botsort_custom.yaml')
+
+
+def _read_kept_frames(cap, keep_idx, last, q, stop):
+    """Reader thread: decode frames 0..last and queue the kept ones, so decoding overlaps
+    YOLO on the GPU instead of alternating with it (cv2 releases the GIL while decoding).
+    Ends the queue with None."""
+    try:
+        for frame_i in range(last + 1):
+            if stop.is_set():
+                return
+            if frame_i in keep_idx:
+                ret, frame = cap.read()     # ret is False once the video runs out
+            else:
+                ret, frame = cap.grab(), None   # advance without converting the image
+            if not ret:
+                break
+            if frame is not None:
+                q.put(frame)
+    finally:
+        q.put(None)
+
+
+def yolo_track_all_individuals(video_path, model, source_frame_idx, half=True):
     cap = cv2.VideoCapture(video_path)
 
     if not cap.isOpened():
@@ -81,65 +108,43 @@ def yolo_track_all_individuals(video_path, model, source_frame_idx):
     src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     print(f"  src: {src_w}x{src_h}  {n_frames} frames {src_fps:.1f} fps")
 
-    frame_i = 0
-    kept_frames = 0
-    id_seen = []
-    history = {}
-
     n_frames = min(n_frames,max(source_frame_idx))
-    source_frame_idx = set(source_frame_idx.tolist()) # speeds up the 'frame_i in source_frame_idx' lookup
-
+    keep_idx = set(source_frame_idx.tolist()) # speeds up the 'frame_i in keep_idx' lookup
     print(f'Num frames: {n_frames}')
 
-    while frame_i <= n_frames:
-        keep = frame_i in source_frame_idx # only analyse frame if index of frame is in source_frame_idx (the set of frames that align with 60fps)
-        if keep:
-            ret, frame = cap.read() # ret is boolean indicating if frame was succesfully loaded, 'frame' is the image itself
-        else:
-            ret = cap.grab() # get frame but don't process/decode image, essentially skipping frame so no next cap call gets next frame
-            frame = None
-        if not ret:
-            break
-        if keep:
-            r = model.track(frame, persist=True,verbose=False,tracker=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'botsort_custom.yaml'))[0]
+    # history[tid] is preallocated for every kept frame and trimmed to kept_frames at the end:
+    # rows stay zero wherever tid wasn't detected (before it first appeared, or while lost),
+    # same as appending a zero row per frame, without re-copying the array every frame.
+    max_kept = len(keep_idx)
+    history = {}
+    kept_frames = 0
+
+    q, stop = queue.Queue(maxsize=32), threading.Event()
+    reader = threading.Thread(target=_read_kept_frames, args=(cap, keep_idx, n_frames, q, stop), daemon=True)
+    reader.start()
+    try:
+        while (frame := q.get()) is not None:
+            r = model.track(frame, persist=True, verbose=False, half=half, tracker=_TRACKER_CFG)[0]
 
             if r.boxes.id is not None:
                 ids  = r.boxes.id.int().cpu().numpy()      # (n,)
                 kpts = r.keypoints.data.cpu().numpy()      # (n, 17, 3), COCO-17 order
-
-                # Looping through all persons seen in this frame and populating history with extracted keypoints
                 for tid, person_coco in zip(ids, kpts):
+                    if tid not in history:
+                        history[tid] = np.zeros((max_kept, 17, 3), dtype=np.float32)
+                    history[tid][kept_frames] = coco2h36m(person_coco[:, :2], person_coco[:, 2])
 
-                    person = coco2h36m(person_coco[:, :2], person_coco[:, 2]).reshape(1,17,3)
+            kept_frames += 1
+    finally:
+        stop.set()
+        while reader.is_alive():        # drain so a reader blocked on a full queue can exit
+            try:
+                q.get(timeout=0.1)
+            except queue.Empty:
+                pass
+        cap.release()
 
-                    if tid not in id_seen:
-                        if kept_frames > 0:
-                            history[tid] = np.zeros((kept_frames,17,3),dtype=np.float32)
-                            history[tid] = np.concatenate((history[tid],person),axis=0)
-                        else:
-                            history[tid] = person
-                        id_seen.append(tid)
-                    else:  
-                        history[tid] = np.concatenate((history[tid],person),axis=0)
-
-                    
-                not_seen_this_frame = list(set(id_seen) - set(ids))
-
-                for tid in not_seen_this_frame:
-                    
-                    history[tid] = np.concatenate((history[tid],np.zeros((1,17,3),dtype=np.float32)),axis=0)
-
-            else:
-
-                # no people detected, set all previously seen people to zeros for this frame
-                for tid in id_seen:
-                    history[tid] = np.concatenate((history[tid],np.zeros((1,17,3),dtype=np.float32)),axis=0)
-
-            kept_frames +=1
-
-        frame_i += 1
-    cap.release()
-
+    history = {tid: h[:kept_frames] for tid, h in history.items()}
     return history, src_w, src_h
 
 
@@ -262,69 +267,84 @@ def find_trials(pattern, user=None, action=None):
     return trials
 
 
-def process_trial(user, action, model, args):
-    """YOLO 2D for one trial's cameras -> {OUT_DIR}/{user}/{action}/Analysis/keypoints/yolo/.
-    Returns (done, skipped, failed) camera counts."""
+def trial_jobs(user, action, args):
+    """Camera videos of one trial still to extract. Returns (videos, n_skipped, n_failed);
+    a trial with no mocap yet counts every pending camera as failed."""
     video_files = sorted(glob.glob(os.path.join(_TRIAL_DIR, user, action, args.pattern)))
     todo = [v for v in video_files if args.force or not os.path.exists(
         _twod_path(user, action, 'yolo', os.path.splitext(os.path.basename(v))[0]))]
     n_skip = len(video_files) - len(todo)
-    if not todo:
-        return 0, n_skip, 0
+    if todo and not os.path.exists(_mocap_path(user, action)):
+        print(f"{user}/{action}: no {_mocap_path(user, action)} -- run step_0_load_mocap.py first")
+        return [], n_skip, len(todo)
+    return todo, n_skip, 0
 
-    mocap_path = _mocap_path(user, action)
-    if not os.path.exists(mocap_path):
-        print(f"{user}/{action}: no {mocap_path} -- run step_0_load_mocap.py first")
-        return 0, n_skip, len(todo)
-    mocap_data = np.load(mocap_path)
-    mocap_world_mm_native = mocap_data['kps3d']           # (T,17,3) mm, world-space, NaN where invalid
-    native_fps = float(mocap_data['fps'])
 
-    # mocap_h36m.npz is kept at native (200Hz) resolution (step_0_load_mocap.py), one row per
-    # native frame -- decimate down to --target-fps here, on the video/tracking side, with the
-    # same nearest_frame_indices() the module docstring describes. The result is still a set of
-    # valid NATIVE frame indices, so mocap_world_mm can just be subset by it directly -- no
-    # separate mocap-side decimation, and no risk of two independent decimations disagreeing.
-    source_frame_idx = nearest_frame_indices(len(mocap_world_mm_native), native_fps, args.target_fps)
-    mocap_world_mm = mocap_world_mm_native[source_frame_idx]
-    out_fps = min(args.target_fps, native_fps)
+def process_video(user, action, video_path, model, args):
+    """YOLO 2D for one camera -> {OUT_DIR}/{user}/{action}/Analysis/keypoints/yolo/.
+    Returns True on success; one bad video must not stop the batch, so errors are printed."""
+    stem = os.path.splitext(os.path.basename(video_path))[0]
+    print(f"\n[{user}/{action} {stem}] {video_path}", flush=True)
+    try:
+        mocap_data = np.load(_mocap_path(user, action))
+        mocap_world_mm_native = mocap_data['kps3d']           # (T,17,3) mm, world-space, NaN where invalid
+        native_fps = float(mocap_data['fps'])
 
-    n_done = n_fail = 0
-    for video_path in todo:
-        stem = os.path.splitext(os.path.basename(video_path))[0]
-        print(f"\n[{user}/{action} {stem}] {video_path}", flush=True)
-        try:
-            calib_path_cam = os.path.join(_TRIAL_DIR, user, f'{stem}.mp4-mocAligned.calib')
-            if not os.path.exists(calib_path_cam):
-                raise FileNotFoundError(calib_path_cam)
-            reset_tracker(model)
-            keypoints_all_users, src_w, src_h = yolo_track_all_individuals(video_path, model, source_frame_idx) # get keypoints for all deteced individuals
-            mocap2d = project_mocap_to_pixel(calib_path_cam, mocap_world_mm) # project mocab to pixel space
+        # mocap_h36m.npz is kept at native (200Hz) resolution (step_0_load_mocap.py), one row per
+        # native frame -- decimate down to --target-fps here, on the video/tracking side, with the
+        # same nearest_frame_indices() the module docstring describes. The result is still a set of
+        # valid NATIVE frame indices, so mocap_world_mm can just be subset by it directly -- no
+        # separate mocap-side decimation, and no risk of two independent decimations disagreeing.
+        source_frame_idx = nearest_frame_indices(len(mocap_world_mm_native), native_fps, args.target_fps)
+        mocap_world_mm = mocap_world_mm_native[source_frame_idx]
+        out_fps = min(args.target_fps, native_fps)
 
-            # score each detected individual by proximity to mocap points
-            best_id, score_by_id, matched_mean_by_id, coverage_by_id = find_closest_user_to_mocap(keypoints_all_users, mocap2d, src_w)
-            if best_id is None or best_id not in keypoints_all_users:
-                raise RuntimeError('no tracked person matched the mocap')
+        calib_path_cam = os.path.join(_TRIAL_DIR, user, f'{stem}.mp4-mocAligned.calib')
+        if not os.path.exists(calib_path_cam):
+            raise FileNotFoundError(calib_path_cam)
+        reset_tracker(model)
+        keypoints_all_users, src_w, src_h = yolo_track_all_individuals(
+            video_path, model, source_frame_idx, half=not args.fp32) # get keypoints for all deteced individuals
+        if not keypoints_all_users:
+            raise RuntimeError('no person tracked in any frame')
+        mocap2d = project_mocap_to_pixel(calib_path_cam, mocap_world_mm) # project mocab to pixel space
 
-            print(f'Identified {len(keypoints_all_users)} persons. Best Id: {best_id}')
-            print(f'{"id":>4}  {"score":>8}  {"matched-only":>12}  {"coverage":>8}')
-            for tid in sorted(score_by_id, key=score_by_id.get):
-                print(f'{int(tid):>4}  {float(score_by_id[tid]):>8.2f}  {float(matched_mean_by_id[tid]):>12.2f}  {coverage_by_id[tid]:>8.1%}')
+        # score each detected individual by proximity to mocap points
+        best_id, score_by_id, matched_mean_by_id, coverage_by_id = find_closest_user_to_mocap(keypoints_all_users, mocap2d, src_w)
+        if best_id is None or best_id not in keypoints_all_users:
+            raise RuntimeError('no tracked person matched the mocap')
 
-            out_path = _twod_path(user, action, 'yolo', stem)
-            os.makedirs(os.path.dirname(out_path), exist_ok=True)
-            np.savez(out_path,
-                     h36m_2d=keypoints_all_users[best_id],                # (T, 17, 3) x_px, y_px, conf
-                     source_frame_idx=source_frame_idx,          # indices into the original 200Hz stream
-                     video=os.path.basename(video_path),
-                     fps = out_fps,
-                     detector=np.array('yolo'))
-            print(f"  -> {out_path}", flush=True)
-            n_done += 1
-        except Exception as e:                      # one bad video must not stop the batch
-            n_fail += 1
-            print(f"  FAILED -- {type(e).__name__}: {e}", flush=True)
-    return n_done, n_skip, n_fail
+        lines = [f'[{user}/{action} {stem}] Identified {len(keypoints_all_users)} persons. Best Id: {best_id}',
+                 f'{"id":>4}  {"score":>8}  {"matched-only":>12}  {"coverage":>8}']
+        for tid in sorted(score_by_id, key=score_by_id.get):
+            lines.append(f'{int(tid):>4}  {float(score_by_id[tid]):>8.2f}  {float(matched_mean_by_id[tid]):>12.2f}  {coverage_by_id[tid]:>8.1%}')
+
+        out_path = _twod_path(user, action, 'yolo', stem)
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        np.savez(out_path,
+                 h36m_2d=keypoints_all_users[best_id],                # (T, 17, 3) x_px, y_px, conf
+                 source_frame_idx=source_frame_idx,          # indices into the original 200Hz stream
+                 video=os.path.basename(video_path),
+                 fps = out_fps,
+                 detector=np.array('yolo'))
+        lines.append(f"  -> {out_path}")
+        print('\n'.join(lines), flush=True)     # one print, so parallel workers don't interleave the table
+        return True
+    except Exception as e:
+        print(f"[{user}/{action} {stem}] FAILED -- {type(e).__name__}: {e}", flush=True)
+        return False
+
+
+_worker_model = None
+
+
+def _init_worker():
+    global _worker_model
+    _worker_model = YOLO(_YOLO_MODEL)
+
+
+def _run_job(job, args):
+    return process_video(*job, _worker_model, args)
 
 
 def main():
@@ -338,6 +358,10 @@ def main():
     ap.add_argument('--target-fps', type=float, default=60)
     ap.add_argument('--force', action='store_true', help='redo cameras whose output already exists')
     ap.add_argument('--dry-run', action='store_true', help='list what would be extracted, run nothing')
+    ap.add_argument('--workers', type=int, default=1,
+                    help='camera videos processed at once, one process + model each. The bottleneck is '
+                         'CPU video decoding, so more than os.cpu_count() gains nothing')
+    ap.add_argument('--fp32', action='store_true', help='full-precision inference (default fp16)')
     args = ap.parse_args()
 
     # Reads the videos and calibs from TRIAL_DIR (the local copy); writes only to
@@ -360,17 +384,33 @@ def main():
                       + ('' if os.path.exists(_mocap_path(user, action)) else '   (no mocap yet -- run step_0)'))
         print(f'{n_todo} camera video(s) to extract, {n_have} already done')
         return
-    print(f"Loading YOLO model: {_YOLO_MODEL}")
-    model = YOLO(_YOLO_MODEL)
+    jobs, n_skip, n_fail = [], 0, 0
+    for user, action in trials:
+        todo, skipped, failed = trial_jobs(user, action, args)
+        jobs += [(user, action, v) for v in todo]
+        n_skip += skipped; n_fail += failed
+    print(f'{len(jobs)} camera video(s) to extract, {n_skip} already done, '
+          f'{args.workers} worker(s), {"fp32" if args.fp32 else "fp16"}')
 
-    tot = np.zeros(3, int)
-    for i, (user, action) in enumerate(trials, 1):
-        counts = process_trial(user, action, model, args)
-        tot += counts
-        if counts[0] or counts[2]:
-            print(f'[{i}/{len(trials)}] {user}/{action}: {counts[0]} done, {counts[1]} already done, '
-                  f'{counts[2]} failed', flush=True)
-    print(f'\n[done] cameras: {tot[0]} extracted, {tot[1]} already done, {tot[2]} failed')
+    n_done = 0
+    if args.workers <= 1:
+        print(f"Loading YOLO model: {_YOLO_MODEL}")
+        model = YOLO(_YOLO_MODEL)
+        for i, job in enumerate(jobs, 1):
+            ok = process_video(*job, model, args)
+            n_done += ok; n_fail += not ok
+            print(f'[{i}/{len(jobs)}]', flush=True)
+    else:
+        # Each worker is its own process with its own model and tracker (a tracker can't be shared
+        # across videos). spawn, not fork: CUDA can't be re-initialised in a forked child.
+        with cf.ProcessPoolExecutor(args.workers, mp_context=mp.get_context('spawn'),
+                                    initializer=_init_worker) as pool:
+            futures = [pool.submit(_run_job, job, args) for job in jobs]
+            for i, fut in enumerate(cf.as_completed(futures), 1):
+                ok = fut.result()
+                n_done += ok; n_fail += not ok
+                print(f'[{i}/{len(jobs)}]', flush=True)
+    print(f'\n[done] cameras: {n_done} extracted, {n_skip} already done, {n_fail} failed')
 
 
 if __name__ == '__main__':
