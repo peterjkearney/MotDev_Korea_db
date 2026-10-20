@@ -3,6 +3,7 @@
 
 For every session (subject) in the Korea B set:
 
+  0. leave out the set's off-floor actions (EXCLUDE_ACTIONS_BY_SET: set A's stairs),
   1. calibrate the three cameras from the pose data (camcal),
   2. refine every rep's camera sync: align_cameras.py's offsets are whole frames
      from one motion signal, so try +-sync_window frames per camera and keep the
@@ -47,7 +48,7 @@ cancels: the pipeline is fed the stature measured from the SAME reconstruction
 the target comes from, and PnP on a stature-scaled skeleton is
 scale-equivariant, so errors expressed as a % of stature are unaffected.  The
 default (--scale stature) sets each session's units so the measured stature
-equals the cohort median (1.02 m).  That is only a choice of unit -- the model
+equals the age set's cohort median (COHORT_STATURE_BY_SET: A 0.894, B 1.006, C 1.103 m).  That is only a choice of unit -- the model
 is fed the same number -- but it keeps every session close to true metres,
 which matters for the RTS smoother's fixed metre-valued noise settings.
 --scale aimpoint instead anchors on camera 1 being 3 m from the rig's aim
@@ -64,8 +65,8 @@ spine = mid(pelvis, thorax), head = mid-ear.  `eval_joint_mask_h36m` excludes
 Nose and Head, matching step_0's mocap `valid_joint_mask`.
 
 Usage:
-    python build_child_gt.py --out /Volumes/Expansion/MotorDevelopment/Korea/B/GT3D
-    python build_child_gt.py --out ... --subjects B010,B011
+    python build_child_gt.py --set B --out "/Volumes/Extreme SSD/MotorDevelopment/Korea/B/GT3D"
+    python build_child_gt.py --set C --out ... --subjects C002,C003
 Resumable: sessions with an existing session_summary.json are skipped unless
 --overwrite.  Per-session and per-rep QA tables are rebuilt at the end.
 """
@@ -86,14 +87,22 @@ import cv2
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import camcal as cc
 
-DATA_DIR = '/Volumes/Expansion/MotorDevelopment/Korea/B/Aligned'
-JSON_DIR = '/Volumes/Expansion/MotorDevelopment/Korea/B'
-VIDEO_DIR = '/Volumes/Expansion/MotorDevelopment/Korea/B_video'
+# Korea data root: {root}/{set}/ per-camera OpenPose JSONs, {root}/{set}/Aligned align_cameras.py's output,
+# {root}/{set}_video/ the videos.  --data / --json-dir / --video-dir override each.
+KOREA_ROOT = os.environ.get('KOREA_ROOT', '/Volumes/Extreme SSD/MotorDevelopment/Korea')
 
 IMAGE_SIZE = (1920, 1080)          # the OpenPose keypoints' pixel frame
 VIDEO_SIZE = (1280, 720)           # the re-encoded videos YOLO will run on
 ANCHOR_DISTANCE = 3.0              # m, camera 1 -> aim point (--scale aimpoint)
-COHORT_STATURE = 1.02              # m, median stature at ~3.75 y (WHO)
+# m, the unit each age set is scaled to (--scale stature): the cohort's median stature, sexes averaged, from the
+# 2017 Korean National Growth Charts (KDCA; WHO Child Growth Standards under 36 months).
+# A 20-35 months, B 36-53, C 54-71.  --cohort-stature overrides.  (B targets built before 2026-10-19, e.g.
+# GT3D_v4 and out_v4, used 1.02 m.)
+COHORT_STATURE_BY_SET = {'A': 0.894, 'B': 1.006, 'C': 1.103}
+# GMS actions left out of the build, per set: set A's actions 1 and 2 are stair walking, so the child is off the
+# floor -- they would pull the floor fit and stature onto a step and break step_4b's floor-contact terms.  They are
+# still in Aligned/ (align_cameras.py keeps them); --exclude-actions overrides ('none' keeps everything).
+EXCLUDE_ACTIONS_BY_SET = {'A': ('1', '2'), 'B': (), 'C': ()}
 CROWN_K = 0.9                      # crown above ear level, x ear-to-ear width
 
 GATES = dict(
@@ -825,7 +834,7 @@ def finish_setup(subject, setup_idx, n_setups, setup, args, video_index, sess_di
 
     s, scale_from = 1.0, 'none'
     if args.scale == 'stature' and np.isfinite(st['stature']):
-        s, scale_from = COHORT_STATURE / st['stature'], 'stature'
+        s, scale_from = args.cohort_stature / st['stature'], 'stature'
     elif ref is not None and ref.get('sess_bones'):
         # A second camera setup of the same child with no upright frames of its own: put it in
         # the first setup's units by matching the long bones.
@@ -1080,7 +1089,7 @@ def process_session(subject, args, video_index):
         return summary
 
     # ---- 1-4. camera setups: calibrate, refine sync, set reps aside, recalibrate
-    loaded = load_reps(args.data, subject)
+    loaded = [r for r in load_reps(args.data, subject) if r['stub'].split('_')[2] not in args.exclude_actions]
     if not loaded:
         summary.update(status='skipped', reasons=['no synced reps'])
         return finish()
@@ -1202,10 +1211,17 @@ def _process_one(task):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    ap.add_argument('--out', required=True, help='output root')
-    ap.add_argument('--data', default=DATA_DIR, help='aligned .npz directory')
-    ap.add_argument('--json-dir', default=JSON_DIR, help='per-camera OpenPose JSONs')
-    ap.add_argument('--video-dir', default=VIDEO_DIR)
+    ap.add_argument('--root', default=KOREA_ROOT, help='Korea data root (env KOREA_ROOT) holding A/, B/, C/')
+    ap.add_argument('--set', choices=['A', 'B', 'C'], default='B', help='age set: A 20-35, B 36-53, C 54-71 months')
+    ap.add_argument('--out', default=None, help='output root; default {root}/{set}/GT3D')
+    ap.add_argument('--data', default=None, help='aligned .npz directory; default {root}/{set}/Aligned')
+    ap.add_argument('--json-dir', default=None, help='per-camera OpenPose JSONs; default {root}/{set}')
+    ap.add_argument('--video-dir', default=None, help='default {root}/{set}_video')
+    ap.add_argument('--cohort-stature', type=float, default=None,
+                    help='m, the stature every session is scaled to; default the set\'s COHORT_STATURE_BY_SET')
+    ap.add_argument('--exclude-actions', default=None,
+                    help="comma-separated GMS actions to leave out ('none' for none); default the set's "
+                         "EXCLUDE_ACTIONS_BY_SET (A: 1,2 = stairs)")
     ap.add_argument('--subjects', default=None, help='comma-separated; default all')
     ap.add_argument('--calib-corr', type=int, default=6000,
                     help='fallback-tier calibration budget, in correspondences. Measured on '
@@ -1224,6 +1240,17 @@ def main():
     ap.add_argument('--overwrite', action='store_true')
     ap.add_argument('--workers', type=int, default=1, help='sessions processed in parallel')
     args = ap.parse_args()
+    args.out = args.out or os.path.join(args.root, args.set, 'GT3D')
+    args.data = args.data or os.path.join(args.root, args.set, 'Aligned')
+    args.json_dir = args.json_dir or os.path.join(args.root, args.set)
+    args.video_dir = args.video_dir or os.path.join(args.root, f'{args.set}_video')
+    args.cohort_stature = args.cohort_stature or COHORT_STATURE_BY_SET[args.set]
+    if args.exclude_actions is None:
+        args.exclude_actions = EXCLUDE_ACTIONS_BY_SET[args.set]
+    else:
+        args.exclude_actions = () if args.exclude_actions == 'none' else tuple(args.exclude_actions.split(','))
+    print(f'set {args.set}: scaling to stature {args.cohort_stature:.3f} m; '
+          f'excluding GMS actions {",".join(args.exclude_actions) or "none"}; data {args.data}', flush=True)
 
     os.makedirs(args.out, exist_ok=True)
     subjects = sorted({f.split('_')[0] for f in os.listdir(args.data)

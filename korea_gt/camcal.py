@@ -83,8 +83,10 @@ STATURE_FRACTION = {
     },
 }
 
-# Median stature: ~1.02 m at 3.75 years (WHO growth standards, both sexes).
-DEFAULT_STATURE = {"child_3_5": 1.02, "adult": 1.70}
+# Median stature, sexes averaged: 1.006 m for Korea set B (36-53 months, 2017 Korean National Growth Charts;
+# build_child_gt.COHORT_STATURE_BY_SET has every set).  Used for initial bone lengths / focal guesses only:
+# build_child_gt runs the bundle adjustment without the bone prior and sets the final unit from stature itself.
+DEFAULT_STATURE = {"child_3_5": 1.006, "adult": 1.70}
 
 
 def bone_lengths_for(stature=None, group="child_3_5"):
@@ -246,7 +248,7 @@ def init_cameras(layout=None, heights=(1.2, 1.2, 1.2), target_dist=3.0,
     )
 
 
-def estimate_focal_from_scale(obs, target_dists, subject_height=1.02,
+def estimate_focal_from_scale(obs, target_dists, subject_height=DEFAULT_STATURE["child_3_5"],
                               top=(0, 1), bottom=ANKLES, span_frac=0.86):
     """Data-driven focal initialisation from apparent subject size.
 

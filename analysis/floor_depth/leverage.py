@@ -43,7 +43,7 @@ for u, rep in REP.items():
             a, b = lev[c][cam], metrics('korea_ctc', u, c)[cam]
             rows.append((u, cam, c, H, D, dh, a[0], a[1], b[0], b[1]))
 
-print('per camera: H = camera height, D = horizontal distance to the hip (mm, 1.02 m-child units); leverage H/D;')
+print('per camera: H = camera height, D = horizontal distance to the hip (mm, out_v4 units: child scaled to 1.02 m, the pre-2026-10-19 B cohort value; new builds use 1.006); leverage H/D;')
 print('dh = planted-ankle median - 25 mm; predicted depth shift -dh*D/H; observed = bias(contact) - bias(25 mm)\n')
 print(f'{"rep":5s}{"cam":>4s}{"cfg":>5s}{"H":>6s}{"D":>6s}{"H/D":>6s}{"dh":>5s} | {"25mm: placed  bias":>19s} | {"own h: placed  bias":>20s} | {"pred":>5s} {"obs":>5s}')
 for u, cam, c, H, D, dh, e0, b0, e1, b1 in rows:

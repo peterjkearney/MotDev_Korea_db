@@ -437,6 +437,7 @@ def main():
     ap.add_argument('--threads', type=int, default=0)
     ap.add_argument('--exclude', default=None, help='comma list of subjects to leave out (dev / sample children)')
     ap.add_argument('--skip-done', action='store_true', help='skip subjects with {out_dir}/{subject}.npz')
+    ap.add_argument('--shard', default=None, help="'k/n': only every n-th subject from the k-th, for parallel runs")
     args = ap.parse_args()
     torch.set_num_threads(args.threads or max(1, os.cpu_count() - 1))
     rng = np.random.default_rng(args.seed)
@@ -455,6 +456,9 @@ def main():
         subs = [s for s in subs if s in args.subjects.split(',')]
     if args.exclude:
         subs = [s for s in subs if s not in args.exclude.split(',')]
+    if args.shard:
+        k, n = (int(x) for x in args.shard.split('/'))
+        subs = subs[k::n]
     if args.skip_done and args.out_dir:
         subs = [s for s in subs if not os.path.exists(os.path.join(args.out_dir, f'{s}.npz'))]
     summary = []

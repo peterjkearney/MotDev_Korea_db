@@ -101,7 +101,7 @@ def main():
         elif st == 'step_4b':
             # subject by subject, scoring and refreshing the tables after each, so progress can be
             # read off results_table_tri.csv and configs_summary.txt while the run is going
-            subjects = users or sorted(d for d in os.listdir(OUT_DIR) if os.path.isdir(os.path.join(OUT_DIR, d)) and d.startswith('B'))
+            subjects = users or sorted(d for d in os.listdir(OUT_DIR) if os.path.isdir(os.path.join(OUT_DIR, d)) and d[:1] in 'ABC')
             for i, u in enumerate(subjects, 1):
                 print(f'\n##### subject {u} ({i}/{len(subjects)})', flush=True)
                 ok = True

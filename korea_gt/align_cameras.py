@@ -43,7 +43,8 @@ Each {stub}.npz holds:
     start                                  (3,) first raw row of each camera in the synced span
 plus sync_status.csv in --out: every rep, its offsets, correlations and outcome.
 
-    python align_cameras.py --out /Volumes/Expansion/MotorDevelopment/Korea/B/Aligned_v2
+    python align_cameras.py --set B --out "/Volumes/Extreme SSD/MotorDevelopment/Korea/B/Aligned"
+    python align_cameras.py --set A --out ...     # JSONs from {--root}/A
     python align_cameras.py --out ... --signal speed --max-lag 30     # the original behaviour
 """
 
@@ -57,7 +58,8 @@ from multiprocessing import Pool
 import numpy as np
 import pandas as pd
 
-DATA_DIR = '/Volumes/Expansion/MotorDevelopment/Korea/B'
+# Korea data root holding the age sets A/, B/, C/ (per-camera OpenPose JSONs) and {set}_video/
+KOREA_ROOT = os.environ.get('KOREA_ROOT', '/Volumes/Extreme SSD/MotorDevelopment/Korea')
 
 SYNC = dict(
     conf_thresh=0.3,      # a joint counts in the signal above this confidence
@@ -388,8 +390,11 @@ def process(task):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    ap.add_argument('--json-dir', default=DATA_DIR, help='per-camera OpenPose JSONs ({stub}_{cam}.json)')
-    ap.add_argument('--out', required=True, help='output folder for the synced reps')
+    ap.add_argument('--root', default=KOREA_ROOT, help='Korea data root (env KOREA_ROOT) holding A/, B/, C/')
+    ap.add_argument('--set', choices=['A', 'B', 'C'], default='B', help='age set: A 20-35, B 36-53, C 54-71 months')
+    ap.add_argument('--json-dir', default=None,
+                    help='per-camera OpenPose JSONs ({stub}_{cam}.json); default {root}/{set}')
+    ap.add_argument('--out', default=None, help='output folder for the synced reps; default {root}/{set}/Aligned')
     ap.add_argument('--signal', choices=sorted(SIGNALS), default='vertical')
     ap.add_argument('--people', choices=['track', 'first'], default='track',
                     help="'track': follow each person over time and keep the one whose movement agrees across "
@@ -398,6 +403,8 @@ def main():
     ap.add_argument('--subjects', default=None, help='comma-separated; default all')
     ap.add_argument('--workers', type=int, default=4)
     args = ap.parse_args()
+    args.json_dir = args.json_dir or os.path.join(args.root, args.set)
+    args.out = args.out or os.path.join(args.root, args.set, 'Aligned')
     os.makedirs(args.out, exist_ok=True)
 
     stubs = sorted({'_'.join(f[:-5].split('_')[:-1]) for f in os.listdir(args.json_dir)

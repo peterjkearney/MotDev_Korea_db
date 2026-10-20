@@ -70,7 +70,7 @@ def main():
     if os.path.exists(path) and not args.force:
         raise SystemExit(f'{path} exists -- a subset should stay fixed once used; --force to replace it')
 
-    subjects = sorted(d for d in os.listdir(OUT_DIR) if d.startswith('B') and os.path.isdir(os.path.join(OUT_DIR, d)))
+    subjects = sorted(d for d in os.listdir(OUT_DIR) if d[:1] in 'ABC' and os.path.isdir(os.path.join(OUT_DIR, d)))
     info = {}
     for s in subjects:
         reps = survey(s)
