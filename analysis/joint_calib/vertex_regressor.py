@@ -101,23 +101,42 @@ def _design(subs, k, fit_frames, rng, with_kw):
     return np.concatenate(rows), np.concatenate(rhs)
 
 
-def fit_weights(subs, k, ridge, fit_frames, rng, with_kw=False, sum_w=1e3):
-    """Convex weights w (>= 0, sum 1); with_kw adds kid weight x u (u free, sum 0) -- a regressor that moves
-    linearly with the kid template weight.  Returns w, or (w, u)."""
+KW_REF = 0.6                       # the kid weight the child regressor is anchored at (set B's median)
+
+
+def fit_weights(subs, k, ridge, fit_frames, rng, with_kw=False, sum_w=1e3, kw_mode='convex', ridge_u=1e-6):
+    """Convex weights w (>= 0, sum 1).  with_kw: two convex regressors, W0 at kid weight 0 (adult) and W1 at KW_REF,
+    blended linearly in the body's kid weight -- W(kw) = W0 + (kw / KW_REF)(W1 - W0) -- so every body between
+    the two gets a true weighted average of surface points (an unconstrained correction went dense, +-14 weights).
+    Returned as (w, u) with W(kw) = w + kw u."""
     M, y = _design(subs, k, fit_frames, rng, with_kw)
     n = M.shape[1] // (2 if with_kw else 1)
     if not with_kw:
         M = np.vstack([M, sum_w * np.ones((1, n)), np.sqrt(ridge) * np.eye(n)])
         w, _ = nnls(M, np.r_[y, sum_w, np.zeros(n)], maxiter=50 * n)
         return w / w.sum()
-    from scipy.optimize import lsq_linear
+    if kw_mode == 'dense':
+        # w >= 0 (sum 1) plus a free correction u (sum 0) scaled by kid weight, ridge_u on u: u's differences
+        # of vertices act as directions that turn with the surface -- a pose-following offset -- but large
+        # cancelling weights are fragile, so ridge_u is chosen by cross-validation
+        from scipy.optimize import lsq_linear
+        cons = np.zeros((2, 2 * n))
+        cons[0, :n], cons[1, n:] = sum_w, sum_w
+        reg = np.sqrt(np.r_[ridge * np.ones(n), ridge_u * np.ones(n)])
+        A = np.vstack([M, cons, np.diag(reg)])
+        lb = np.r_[np.zeros(n), -np.inf * np.ones(n)]
+        sol = lsq_linear(A, np.r_[y, sum_w, 0.0, np.zeros(2 * n)], bounds=(lb, np.inf * np.ones(2 * n)),
+                         method='bvls', max_iter=200)
+        return sol.x[:n], sol.x[n:]
+    # _design's columns are [V, kw V]: re-express them on (W0, W1): V W0 (1 - kw/r) + V W1 kw/r
+    Va, Vk = M[:, :n], M[:, n:]
+    A = np.hstack([Va - Vk / KW_REF, Vk / KW_REF])
     cons = np.zeros((2, 2 * n))
     cons[0, :n], cons[1, n:] = sum_w, sum_w
-    M = np.vstack([M, cons, np.sqrt(ridge) * np.eye(2 * n)])
-    y = np.r_[y, sum_w, 0.0, np.zeros(2 * n)]
-    lb = np.r_[np.zeros(n), -np.inf * np.ones(n)]
-    sol = lsq_linear(M, y, bounds=(lb, np.inf * np.ones(2 * n)), method='bvls', max_iter=200)
-    return sol.x[:n], sol.x[n:]
+    A = np.vstack([A, cons, np.sqrt(ridge) * np.eye(2 * n)])
+    W, _ = nnls(A, np.r_[y, sum_w, sum_w, np.zeros(2 * n)], maxiter=50 * 2 * n)
+    W0, W1 = W[:n] / W[:n].sum(), W[n:] / W[n:].sum()
+    return W0, (W1 - W0) / KW_REF
 
 
 def predict(sub, k, model, train):
@@ -207,7 +226,8 @@ def _count(subs):
 def fit_all(train, args, rng):
     W = {k: fit_weights(train, k, args.ridge, args.fit_frames, rng) for k in KEYPOINTS}
     kw = np.array([s['kw'] for s in train])
-    Wkw = ({k: fit_weights(train, k, args.ridge, args.fit_frames, rng, with_kw=True) for k in KEYPOINTS}
+    Wkw = ({k: fit_weights(train, k, args.ridge, args.fit_frames, rng, with_kw=True, kw_mode=args.kw_mode,
+                           ridge_u=args.ridge_u) for k in KEYPOINTS}
            if kw.std() > 1e-3 and not args.no_kw else None)
     return W, Wkw
 
@@ -224,6 +244,11 @@ def main():
     ap.add_argument('--no-kw', action='store_true', help='skip the kid-weight regressor (slow on many subjects)')
     ap.add_argument('--folds', type=int, default=5, help='cross-validation folds (by subject, stratified by group)')
     ap.add_argument('--loso', action='store_true', help='also leave-one-child-set-out (extrapolation stress test)')
+    ap.add_argument('--kw-mode', choices=('convex', 'dense'), default='convex',
+                    help="kid-weight regressor: 'convex' blends two convex regressors (safe); 'dense' adds a free "
+                         "correction u (pose-following, fragile unless --ridge-u is large enough)")
+    ap.add_argument('--ridge-u', type=float, default=1e-6, help="'dense': ridge on the correction u")
+    ap.add_argument('--exclude-groups', default=None, help="comma list of subject-name prefixes to leave out, e.g. 'A'")
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--out', default=None)
     args = ap.parse_args()
@@ -231,6 +256,8 @@ def main():
     cand = candidates({'Hip': args.radius_hip_mm / 1000.0, 'Shoulder': args.radius_shoulder_mm / 1000.0})
     print('candidate vertices: ' + ', '.join(f'{k} {len(c)}' for k, c in cand.items()))
     paths = sorted(p for d in args.fit_dirs for p in glob.glob(os.path.join(d, '*.npz')))
+    drop = tuple(args.exclude_groups.split(',')) if args.exclude_groups else ()
+    paths = [p for p in paths if os.path.basename(p)[0] not in drop]
     subs = [subject_meshes(p, cand, args.max_frames, rng) for p in paths]
     held = set(args.heldout.split(','))
     adults = [s for s in subs if s['group'] == 'adult']

@@ -22,4 +22,5 @@ __pycache__/
 *.bin
 *.pkl
 *.zip
+*.log
 /data

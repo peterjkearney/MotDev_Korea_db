@@ -94,7 +94,11 @@ def load_views(kp_dir, calib_dir_list, frames=None):
         sfi = s if sfi is None else sfi[:min(len(sfi), len(s))]
         xy.append(z['body25_2d'][..., :2])
         conf.append(z['body25_2d'][..., 2])
-        cp = next(p for p in (os.path.join(r, f'{c}.mp4-mocAligned.calib') for r in calib_dir_list) if os.path.exists(p))
+        cp = next((p for p in (os.path.join(r, f'{c}.mp4-mocAligned.calib') for r in calib_dir_list)
+                   if os.path.exists(p)), None)
+        if cp is None:
+            raise FileNotFoundError(f'no {c}.mp4-mocAligned.calib in {calib_dir_list} -- is the drive holding the '
+                                    'calibrations mounted? (BioCV: --calib-root)')
         _, _, K, L, dist = load_calib(cp)
         calibs.append((K, dist, L[:3, :3], L[:3, 3]))
     n = len(sfi)
@@ -281,7 +285,9 @@ def gm(r2, s):
     return r2 / (r2 + s * s) * s * s
 
 
-def fit_subject(X, kid, args, log):
+def fit_subject(X, kid, args, log, fixed=None):
+    """fixed: optional {'betas': raw betas, 'offsets': {group: rest offset m}} held constant -- only the pose is
+    fitted (re-posing one rep with a subject's fitted body, e.g. for rendering)."""
     T = len(X)
     names = [n for n in WEIGHT]
     tgt = torch.tensor(np.stack([X[:, B[n]] for n in names], 1))            # (T,K,3)
@@ -294,6 +300,11 @@ def fit_subject(X, kid, args, log):
         model.root.copy_(torch.tensor(aa))
         if kid:
             model.betas[-1] = 0.6
+        if fixed is not None:
+            model.betas.copy_(torch.tensor(fixed['betas']))
+            for g, d in fixed['offsets'].items():
+                if g in model.offsets:
+                    model.offsets[g].copy_(torch.tensor(d))
         _, J_rest = model.rest()
         Rr = rodrigues(model.root)
         model.trans.copy_(torch.tensor(mid) - Rr @ J_rest[0])
@@ -323,7 +334,8 @@ def fit_subject(X, kid, args, log):
     # coarse to fine: a wide robust scale first so far-off limbs still pull, then the working scale
     for stage, (params, iters, scale, torso_only) in enumerate(((rt, 60, 300.0, True), (rtp, 100, 300.0, False),
                                                                 (rtp, 100, 100.0, False),
-                                                                (list(model.parameters()), args.iters, args.robust_mm,
+                                                                (list(model.parameters()) if fixed is None else rtp,
+                                                                 args.iters, args.robust_mm,
                                                                  False))):
         opt = torch.optim.LBFGS(params, lr=1.0, max_iter=iters, history_size=20, line_search_fn='strong_wolfe',
                                 tolerance_grad=1e-9, tolerance_change=1e-12)

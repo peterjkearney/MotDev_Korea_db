@@ -105,7 +105,30 @@ def load_h36m_regressor():
 SMPL24_FOR_H36M = {'RHip': 'R_Hip', 'RKnee': 'R_Knee', 'RAnkle': 'R_Ankle', 'LHip': 'L_Hip', 'LKnee': 'L_Knee',
                    'LAnkle': 'L_Ankle', 'LShoulder': 'L_Shoulder', 'LElbow': 'L_Elbow', 'LWrist': 'L_Wrist',
                    'RShoulder': 'R_Shoulder', 'RElbow': 'R_Elbow', 'RWrist': 'R_Wrist'}
-JOINTS = ('h36m', 'smpl24', 'op', 'op_hs', 'op_hw')
+JOINTS = ('h36m', 'smpl24', 'op', 'op_hs', 'op_hw', 'opr')
+
+# OpenPose-style hips and shoulders as a VERTEX regressor ('opr'): SMPL-24's H36M-17 with LHip/RHip/LShoulder/RShoulder
+# replaced by fixed vertex weights (w + kid_weight * u), calibrated by analysis/joint_calib (smpl_op_fit.py:
+# SMPL fitted to triangulated OpenPose of BioCV adults and Korea set B/C children; vertex_regressor.py: weights,
+# 5-fold cross-validated by subject).  Like the kid template it is derived from the SMPL model, so it is kept
+# out of git: OPENPOSE_REGRESSOR, else the repo's models/ folder (on Colab: copy it next to the kid template).
+OPR_KEYPOINTS = ('LHip', 'RHip', 'LShoulder', 'RShoulder')
+OPR_CANDIDATES = [os.environ.get('OPENPOSE_REGRESSOR'), os.path.join(MODELS_DIR, 'openpose_regressor.npz')]
+
+
+def opr_rows(kw):
+    """{keypoint: (6890,) vertex weights} at kid weight kw: w + kw * u (sum 1)."""
+    path = next((c for c in OPR_CANDIDATES if c and os.path.isfile(c)), None)
+    if path is None:
+        raise SystemExit(f'openpose_regressor.npz not found (looked in {[c for c in OPR_CANDIDATES if c]}) -- '
+                         'copy analysis/joint_calib output there, or set OPENPOSE_REGRESSOR')
+    z = np.load(path)
+    rows = {}
+    for k in OPR_KEYPOINTS:
+        r = np.zeros(6890)
+        r[z[f'{k}_vertices']] = z[f'{k}_weights_kw_w'] + float(kw) * z[f'{k}_weights_kw_u']
+        rows[k] = r
+    return rows
 
 # OpenPose-style joints ('op'): the SMPL-24 joint plus a per-joint offset carried rigidly by one SMPL bone.
 # OpenPose keypoints are not joint centres; calibrated on BioCV (analysis/joint_calib/op_offsets.py: 9-camera
@@ -188,20 +211,24 @@ def op_size(j24):
     return sh - 0.5 * (j24[..., SMPL24.index('L_Ankle'), 1] + j24[..., SMPL24.index('R_Ankle'), 1])
 
 
-def joint_regressor(joints='h36m'):
+def joint_regressor(joints='h36m', kw=0.0):
     """(17,6890) vertex regressor for the H36M-17 layout: 'h36m' the mesh checkpoint's H36M regressor,
     'smpl24' the layout rebuilt from SMPL's J_regressor (SMPL24_FOR_H36M).  'op' regresses the same points
-    as 'smpl24' (so does 'op_hs'): their offsets (op_offsets) are added by load_linear and MiniSMPL."""
+    as 'smpl24' (so does 'op_hs'): their offsets (op_offsets) are added by load_linear and MiniSMPL.
+    'opr' is 'smpl24' with the hips and shoulders from the OpenPose vertex regressor at kid weight kw."""
     Jh = load_h36m_regressor()
     if joints == 'h36m':
         return Jh
-    if joints not in ('smpl24',) + tuple(OP_SETS):
+    if joints not in ('smpl24', 'opr') + tuple(OP_SETS):
         raise ValueError(f'unknown joints {joints!r} (one of {JOINTS})')
     Jr = _load_pkl()['J_regressor']
     Jr = Jr.toarray() if sp.issparse(Jr) else np.asarray(Jr, dtype=np.float64)
     out = Jh.copy()                                                  # Nose, Head stay H36M's
     for h, s in SMPL24_FOR_H36M.items():
         out[J[h]] = Jr[SMPL24.index(s)]
+    if joints == 'opr':
+        for k, r in opr_rows(kw).items():
+            out[J[k]] = r
     out[J['Hip']] = 0.5 * (out[J['RHip']] + out[J['LHip']])
     out[J['Thorax']] = 0.5 * (out[J['RShoulder']] + out[J['LShoulder']])
     out[J['Spine']] = 0.5 * (out[J['Hip']] + out[J['Thorax']])
@@ -228,17 +255,19 @@ def fit_pose_rotmats():
     return R
 
 
-def load_linear(n_betas=10, kid=False, joints='h36m'):
+def load_linear(n_betas=10, kid=False, joints='h36m', opr_kw=0.0):
     """v_t (6890,3), S (6890,3,n), J0 (17,3), A (17,3,n): rest-pose vertices / H36M-17 joints linear in shape
-    (joints: see joint_regressor; the OpenPose-style sets are posed in FIT_POSE, see below)."""
+    (joints: see joint_regressor; the OpenPose-style sets are posed in FIT_POSE, see below).  'opr' depends on
+    the kid weight through its regressor, so it is linearised with the regressor held at opr_kw (step_2c
+    iterates: fit, set opr_kw to the fitted kid weight, refit)."""
     m = _load_pkl()
     v_t = np.asarray(m['v_template'], dtype=np.float64)
     S = np.asarray(m['shapedirs'], dtype=np.float64)[:, :, :n_betas]
     if kid:
         S = np.concatenate([S, kid_shapedir(v_t)[:, :, None]], axis=2)
-    Jr = joint_regressor(joints)
+    Jr = joint_regressor(joints, kw=opr_kw)
     J0, A = Jr @ v_t, np.einsum('jv,vck->jck', Jr, S)
-    if joints in OP_SETS:
+    if joints in OP_SETS or joints == 'opr':
         # OpenPose-style joints are not on the rotation centres, so their segment lengths depend on the pose: the
         # T-pose would turn the shoulders' lateral offset along the upper arm.  They are measured in FIT_POSE
         # (standing, arms down, as most target frames are) on the skinned model step_4b uses (MiniSMPL: joints
@@ -250,10 +279,10 @@ def load_linear(n_betas=10, kid=False, joints='h36m'):
 
         def posed(x):
             with torch.no_grad():
-                return MiniSMPL(x, joints=joints).forward(rm)[1][0].numpy()
+                return MiniSMPL(x, joints=joints, opr_kw=opr_kw).forward(rm)[1][0].numpy()
         J0 = posed(np.zeros(n))
         A = np.stack([posed(np.eye(n)[k]) - J0 for k in range(n)], -1)
-    return dict(v_t=v_t, S=S, J0=J0, A=A, kid=kid, n_betas=n_betas, joints=joints)
+    return dict(v_t=v_t, S=S, J0=J0, A=A, kid=kid, n_betas=n_betas, joints=joints, opr_kw=opr_kw)
 
 
 def midpoint_centres(lin):
@@ -372,12 +401,15 @@ class MiniSMPL:
     shape: 10 betas, or 11 with the kid weight last.  full=True skins all 6890 vertices
     (for rendering: vertices() and faces).  joints: which regressor the H36M-17 output uses (joint_regressor)."""
 
-    def __init__(self, shape, device='cpu', full=False, joints='h36m'):
+    def __init__(self, shape, device='cpu', full=False, joints='h36m', opr_kw=None):
         import torch
         m = _load_pkl()
         Jr = m['J_regressor']
         Jr = Jr.toarray() if sp.issparse(Jr) else np.asarray(Jr)
-        Jh = joint_regressor(joints)
+        shape = np.asarray(shape, dtype=np.float64)
+        if opr_kw is None:                                     # 'opr': the regressor at this body's own kid weight
+            opr_kw = float(shape[10]) if shape.size > 10 else 0.0
+        Jh = joint_regressor(joints, kw=opr_kw)
         idx = (np.arange(Jr.shape[1]) if full else
                np.where((np.abs(Jr).sum(0) > 0) | (np.abs(Jh).sum(0) > 0))[0])
         self.faces = np.asarray(m['f'], dtype=np.int64) if full else None

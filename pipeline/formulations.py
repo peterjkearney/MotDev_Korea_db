@@ -18,6 +18,8 @@ A configuration is one way of turning MotionBERT's pass-1 rotations into a place
                                term, the floor contact and the scored output
                  'op'          SMPL-24 joints + per-joint offsets carried by their bones, calibrated on BioCV
                                (smpl_lite.OP_OFFSETS_MM): the points OpenPose detects, not joint centres
+                 'opr'         SMPL-24 with the hips and shoulders from the OpenPose vertex regressor (smpl_lite.opr_rows,
+                               models/openpose_regressor.npz), which moves with the body's kid weight
                  'op_hs'       only the hip and shoulder offsets across the body (lateral, forward): the along-limb
                                offsets carry BioCV mocap's joint-centre conventions (smpl_lite.OP_SETS)
     placement    'pnp'         step_4's rigid PnP per frame + RTS root smoothing; no refinement
@@ -124,6 +126,10 @@ CHAIN = {
     'C16': dict(_C14, shape='kid_hsgw', joints='op_hs', note='C15 with the hip and shoulder widths in the shape fit'),
     'C17': dict(_C14, shape='kid_opg', joints='op', note='C14 on fully OpenPose-style joints (every offset)'),
     'C18': dict(_C14, shape='kid_hwg', joints='op_hw', note='C14 with the hips widened to OpenPose\'s (lateral offset only)'),
+    # hips and shoulders where OpenPose puts them, as a vertex regressor calibrated against SMPL itself on BioCV
+    # adults + Korea B/C children (analysis/joint_calib), moving with the kid weight
+    'C19': dict(_C14, shape='kid_oprg', joints='opr', note='C14 with OpenPose vertex-regressor hips/shoulders'),
+    'C20': dict(_C14, shape='kid_oprgw', joints='opr', note='C19 with the hip and shoulder widths in the shape fit'),
 }
 
 # one component removed from the child recipe at a time

@@ -87,7 +87,7 @@ class Shapes:
             return b, self.stature(user) / h, h, f"MotionBERT betas, rescaled x{self.stature(user) / h:.3f} to {self.stature(user):.2f} m"
         if name in ('adult', 'kid', 'adult_nw', 'kid_nw', 'adult_s24', 'kid_s24', 'adult_s24g', 'kid_s24g',
                     'adult_opg', 'kid_opg', 'adult_opgw', 'kid_opgw', 'adult_hsg', 'kid_hsg', 'adult_hsgw', 'kid_hsgw',
-                    'adult_hwg', 'kid_hwg'):
+                    'adult_hwg', 'kid_hwg', 'adult_oprg', 'kid_oprg', 'adult_oprgw', 'kid_oprgw'):
             p = shapes_path(user)
             if not os.path.exists(p):
                 raise FileNotFoundError(f'{p} -- run step_2c_fit_shape.py first')
@@ -96,7 +96,8 @@ class Shapes:
                 raise FileNotFoundError(f'{p} has no {name!r} -- rerun step_2c_fit_shape.py --force')
             b = z[name].astype(np.float64)
         elif name in ('cohort_kid', 'cohort_kid_nw', 'cohort_kid_s24', 'cohort_kid_s24g', 'cohort_kid_opg',
-                      'cohort_kid_opgw', 'cohort_kid_hsg', 'cohort_kid_hsgw', 'cohort_kid_hwg'):
+                      'cohort_kid_opgw', 'cohort_kid_hsg', 'cohort_kid_hsgw', 'cohort_kid_hwg', 'cohort_kid_oprg',
+                      'cohort_kid_oprgw'):
             p = cohort_shapes_path()
             if not os.path.exists(p):
                 raise FileNotFoundError(f'{p} -- run step_2c_fit_shape.py --cohort first')
