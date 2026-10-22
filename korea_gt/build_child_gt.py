@@ -65,7 +65,7 @@ spine = mid(pelvis, thorax), head = mid-ear.  `eval_joint_mask_h36m` excludes
 Nose and Head, matching step_0's mocap `valid_joint_mask`.
 
 Usage:
-    python build_child_gt.py --set B --out "/Volumes/Extreme SSD/MotorDevelopment/Korea/B/GT3D"
+    python build_child_gt.py --set B --out "/Volumes/Sandisk_SSD/MotorDevelopment/Korea/B/GT3D"
     python build_child_gt.py --set C --out ... --subjects C002,C003
 Resumable: sessions with an existing session_summary.json are skipped unless
 --overwrite.  Per-session and per-rep QA tables are rebuilt at the end.
@@ -89,7 +89,7 @@ import camcal as cc
 
 # Korea data root: {root}/{set}/ per-camera OpenPose JSONs, {root}/{set}/Aligned align_cameras.py's output,
 # {root}/{set}_video/ the videos.  --data / --json-dir / --video-dir override each.
-KOREA_ROOT = os.environ.get('KOREA_ROOT', '/Volumes/Extreme SSD/MotorDevelopment/Korea')
+KOREA_ROOT = os.environ.get('KOREA_ROOT', '/Volumes/Sandisk_SSD/MotorDevelopment/Korea')
 
 IMAGE_SIZE = (1920, 1080)          # the OpenPose keypoints' pixel frame
 VIDEO_SIZE = (1280, 720)           # the re-encoded videos YOLO will run on

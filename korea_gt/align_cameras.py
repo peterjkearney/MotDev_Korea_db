@@ -43,7 +43,7 @@ Each {stub}.npz holds:
     start                                  (3,) first raw row of each camera in the synced span
 plus sync_status.csv in --out: every rep, its offsets, correlations and outcome.
 
-    python align_cameras.py --set B --out "/Volumes/Extreme SSD/MotorDevelopment/Korea/B/Aligned"
+    python align_cameras.py --set B --out "/Volumes/Sandisk_SSD/MotorDevelopment/Korea/B/Aligned"
     python align_cameras.py --set A --out ...     # JSONs from {--root}/A
     python align_cameras.py --out ... --signal speed --max-lag 30     # the original behaviour
 """
@@ -59,7 +59,7 @@ import numpy as np
 import pandas as pd
 
 # Korea data root holding the age sets A/, B/, C/ (per-camera OpenPose JSONs) and {set}_video/
-KOREA_ROOT = os.environ.get('KOREA_ROOT', '/Volumes/Extreme SSD/MotorDevelopment/Korea')
+KOREA_ROOT = os.environ.get('KOREA_ROOT', '/Volumes/Sandisk_SSD/MotorDevelopment/Korea')
 
 SYNC = dict(
     conf_thresh=0.3,      # a joint counts in the signal above this confidence

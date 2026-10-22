@@ -30,6 +30,8 @@ Needs pyrender + trimesh (motEnv has them) and the SMPL pickle smpl_lite finds.
     python3 tools/render_mesh.py --user P03 --action P03_CMJM_01 --cam 07 --configs C0,C5,C8 --smooth C0
     python3 tools/render_mesh.py --user B010 --action B010_GMS_1_1 --cam 1 --gt tri --smooth C0
     python3 tools/render_mesh.py --user B010 --action B010_GMS_1_1 --cam 1 --gt tri --configs C8,C10 --com
+    python3 tools/render_mesh.py --user B023 --action B023_GMS_2_2 --cam 2 --gt tri --configs C0,C8,C14,C19 \
+        --smooth C0 --grid-cols 2 --panel 460x540                   # 2x2 grid, landscape
 """
 import argparse
 import json
@@ -290,6 +292,8 @@ def main():
     ap.add_argument('--panel', default='480x600', help='panel size WxH')
     ap.add_argument('--mesh-alpha', type=float, default=0.8, help='mesh opacity over the video')
     ap.add_argument('--fps', type=float, default=None, help='output frame rate (default: the analysis rate)')
+    ap.add_argument('--grid-cols', type=int, default=1,
+                    help='configurations side by side: 2 lays four out as a 2x2 grid of (camera, orbit) pairs')
     ap.add_argument('--frames', default=None, help='a:b row range, for a quick look')
     ap.add_argument('--out', default=None)
     args = ap.parse_args()
@@ -370,7 +374,10 @@ def main():
     to_panel = [np.float32([[b[2], 0, -b[2] * b[0]], [0, b[2], -b[2] * b[1]]]) for b in boxes]
 
     title_h = 58
-    W, Hh = 2 * pw + 6, title_h + len(rows) * (ph + 6)
+    ncol = max(1, args.grid_cols)
+    nrow = -(-len(rows) // ncol)
+    bw, gap = 2 * pw + 6, 14                                    # one configuration: camera + orbit panels
+    W, Hh = ncol * bw + (ncol - 1) * gap, title_h + nrow * (ph + 6)
     out = args.out or os.path.join(analysis_dir(args.user, args.action), 'diagnostics', args.detector,
                                    f'{args.cam}_mesh_{"_".join(configs)}{"_gtall" if args.all_cameras else ""}.mp4')
     os.makedirs(os.path.dirname(out), exist_ok=True)
@@ -393,12 +400,15 @@ def main():
         put(canvas, f'{args.user} {args.action}  |  {args.detector} 2D  |  cam {args.cam}  |  '
                     f'white: {gt_name} skeleton', (10, 22), 0.55)
         put(canvas, f'{i / fps:5.2f} s', (W - 80, 22), 0.55)
-        put(canvas, f'camera {args.cam} view' + (' (no video)' if cap is None else ''), (pw // 2 - 70, 49), 0.6,
-            (190, 190, 190))
-        put(canvas, f'orbited {args.azimuth:.0f} deg about vertical', (pw + 6 + pw // 2 - 125, 49), 0.6,
-            (190, 190, 190))
+        for ci in range(min(ncol, len(rows))):
+            bx = ci * (bw + gap)
+            put(canvas, f'camera {args.cam} view' + (' (no video)' if cap is None else ''), (bx + pw // 2 - 70, 49), 0.6,
+                (190, 190, 190))
+            put(canvas, f'orbited {args.azimuth:.0f} deg about vertical', (bx + pw + 6 + pw // 2 - 125, 49), 0.6,
+                (190, 190, 190))
         for ri, r in enumerate(rows):
-            y0 = title_h + ri * (ph + 6)
+            y0 = title_h + (ri // ncol) * (ph + 6)
+            bx = (ri % ncol) * (bw + gap)
             col = ROW_COLOURS[ri % len(ROW_COLOURS)]
             for vi, M in enumerate(views):
                 bg = cam_bg.copy() if vi == 0 else side_bg.copy()
@@ -407,7 +417,9 @@ def main():
                 al = al * (args.mesh_alpha if vi == 0 else 1.0)
                 img = (bg * (1 - al) + rgb[..., ::-1] * al).astype(np.uint8)
                 if not np.isnan(gt_cam[i]).all():
-                    draw_skeleton(img, proj(Ks[vi], apply(M, gt_cam[i])), gt_ok)
+                    # every joint with coordinates is drawn: gt_ok is the SCORING mask, which leaves out
+                    # Spine/Nose/Head (synthesised or not comparable) and would hide the trunk and neck
+                    draw_skeleton(img, proj(Ks[vi], apply(M, gt_cam[i])), np.ones(17, bool))
                 if args.com and r['ok'][i]:
                     draw_support(img, Ks[vi], M, L_ext, r['com'][i], r['drop'][i], r['hulls'][i], r['excess'][i],
                                  args.com_margin)
@@ -430,7 +442,7 @@ def main():
                     strip = r['strip'].copy()
                     cv2.line(strip, (xs(i), 0), (xs(i), strip_h), (255, 255, 255), 1)
                     img[ph - strip_h:] = strip
-                x0 = vi * (pw + 6)
+                x0 = bx + vi * (pw + 6)
                 canvas[y0:y0 + ph, x0:x0 + pw] = img
         writer.write(canvas)
         if (i - a) % 50 == 0:

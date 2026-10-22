@@ -20,6 +20,7 @@ A configuration is one way of turning MotionBERT's pass-1 rotations into a place
                                (smpl_lite.OP_OFFSETS_MM): the points OpenPose detects, not joint centres
                  'opr'         SMPL-24 with the hips and shoulders from the OpenPose vertex regressor (smpl_lite.opr_rows,
                                models/openpose_regressor.npz), which moves with the body's kid weight
+                 'oprf'        'opr' with Nose / Head as the mesh's nose vertex / mid-ear vertices (OpenPose's points)
                  'op_hs'       only the hip and shoulder offsets across the body (lateral, forward): the along-limb
                                offsets carry BioCV mocap's joint-centre conventions (smpl_lite.OP_SETS)
     placement    'pnp'         step_4's rigid PnP per frame + RTS root smoothing; no refinement
@@ -130,6 +131,10 @@ CHAIN = {
     # adults + Korea B/C children (analysis/joint_calib), moving with the kid weight
     'C19': dict(_C14, shape='kid_oprg', joints='opr', note='C14 with OpenPose vertex-regressor hips/shoulders'),
     'C20': dict(_C14, shape='kid_oprgw', joints='opr', note='C19 with the hip and shoulder widths in the shape fit'),
+    # the head into the 2D term: Nose and Head as the mesh's nose and ear vertices -- the points OpenPose detects --
+    # so the 2D can correct MotionBERT's head orientation (before, nothing did: Nose/Head were out of every term)
+    'C21': dict(_C14, shape='kid_oprg', joints='oprf', exclude_2d='Spine',
+                note='C19 + nose and ears (mesh vertices) in the 2D term'),
 }
 
 # one component removed from the child recipe at a time

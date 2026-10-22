@@ -16,7 +16,7 @@ Both: the mesh (translucent), the triangulated BODY_25 skeleton (white), and at 
     green   the kid-weight regressor's prediction
 plus the per-frame hip error (green to white, mm) in the corner.
 
-    python analysis/joint_calib/render_fit.py --gt3d "/Volumes/Extreme SSD/MotorDevelopment/Korea/A/GT3D" \\
+    python analysis/joint_calib/render_fit.py --gt3d "/Volumes/Sandisk_SSD/MotorDevelopment/Korea/A/GT3D" \\
         --fits analysis/joint_calib/out/fit_v3 --vreg analysis/joint_calib/out/vreg_v3.npz --pick-group A
 """
 import argparse
