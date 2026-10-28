@@ -14,13 +14,17 @@ down-weighted by size.
 
 Tested by stratified k-fold cross-validation BY SUBJECT (every subject scored by a model that never saw them;
 every fold keeps its share of adults and of each child set A/B/C), then on the evaluation children (--heldout,
-never trained on).  --loso adds leave-one-child-set-out, an extrapolation stress test.  Scored per test subject as the median residual (data - prediction) in the pelvis (hips) / thorax (shoulders) bone
+never trained on).  With --splits (datasets/korea/splits.json) the children come from the split instead: train
+children are the calibration set (cross-validated within), dev children are the evaluation set, and test children
+are scored only with --test (once, when the recipe is settled); children in no split (set A) are left out.
+--loso adds leave-one-child-set-out, an extrapolation stress test.  Scored per test subject as the median residual (data - prediction) in the pelvis (hips) / thorax (shoulders) bone
 frame, (lateral, up, forward), lateral away from the midline, scaled to OP_SIZE_MM; compared with
     joint      the SMPL-24 joint itself (no offset)
     offset     joint + the training group's mean size-scaled offset (smpl_op_fit's model, one offset for all)
     regressor  this
 
     python3 analysis/joint_calib/vertex_regressor.py <fit_dir> [<fit_dir> ...] --heldout B010,B011,B014,B023 [--out w.npz]
+    python3 analysis/joint_calib/vertex_regressor.py <fit_dir> --splits pipeline/datasets/korea/splits.json [--out w.npz]
 <fit_dir>: smpl_op_fit.py --out-dir outputs ({subject}.npz with pose/root/trans/X); P* adults, B* children.
 """
 import argparse
@@ -236,6 +240,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('fit_dirs', nargs='+')
     ap.add_argument('--heldout', default='B010,B011,B014,B023', help='evaluation children, never trained on')
+    ap.add_argument('--splits', default=None, help='splits.json: train children calibrate, dev evaluate (overrides --heldout)')
+    ap.add_argument('--test', action='store_true', help='--splits: also score the test children (once, at the end)')
     ap.add_argument('--radius-hip-mm', type=float, default=150.0)
     ap.add_argument('--radius-shoulder-mm', type=float, default=120.0)
     ap.add_argument('--ridge', type=float, default=1e-6)
@@ -259,10 +265,18 @@ def main():
     drop = tuple(args.exclude_groups.split(',')) if args.exclude_groups else ()
     paths = [p for p in paths if os.path.basename(p)[0] not in drop]
     subs = [subject_meshes(p, cand, args.max_frames, rng) for p in paths]
-    held = set(args.heldout.split(','))
     adults = [s for s in subs if s['group'] == 'adult']
-    kids = [s for s in subs if s['group'] != 'adult' and s['name'] not in held]
-    heldout = [s for s in subs if s['name'] in held]
+    if args.splits:
+        import json
+        with open(args.splits) as f:
+            sp = json.load(f)
+        kids = [s for s in subs if s['name'] in sp['train']]
+        heldout = [s for s in subs if s['name'] in sp['dev']]
+        test = [s for s in subs if s['name'] in sp['test']] if args.test else []
+    else:
+        held = set(args.heldout.split(','))
+        kids = [s for s in subs if s['group'] != 'adult' and s['name'] not in held]
+        heldout, test = [s for s in subs if s['name'] in held], []
     sets = sorted({s['group'] for s in kids})
     print(f'{len(adults)} adults, {len(kids)} calibration children ({_count(kids)}), {len(heldout)} held out')
     for g in ['adult'] + sets:
@@ -292,7 +306,10 @@ def main():
             report(f'2. adults + other sets -> set {g} (extrapolation stress test)',
                    [s for s in kids if s['group'] == g], tr, W, Wkw)
     W_all, Wkw_all = fit_all(adults + kids, args, rng)
-    report('3. adults + all children -> held-out children', heldout, adults + kids, W_all, Wkw_all)
+    report('3. adults + all children -> ' + ('dev children' if args.splits else 'held-out children'),
+           heldout, adults + kids, W_all, Wkw_all)
+    if test:
+        report('4. adults + all children -> TEST children', test, adults + kids, W_all, Wkw_all)
     report('3. adults + all children -> training groups (in-sample)', adults + kids, adults + kids, W_all, Wkw_all)
     if args.out:
         extra = {}

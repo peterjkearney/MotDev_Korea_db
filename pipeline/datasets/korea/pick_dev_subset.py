@@ -15,6 +15,10 @@ from different GMS tasks where it can (B010_GMS_<task>_<trial>).  A rep is usabl
     reads   {OUT_DIR}/{subject}/{rep}/Analysis/H36M/openpose_tri_h36m.npz, {rep}/*.mp4-mocAligned.calib
     writes  {OUT_DIR}/{name}.json   {"name", "seed", "criteria", "trials": {subject: [reps]}, "held_out": [subjects]}
 
+With --splits (datasets/korea/splits.json, make_splits.py) the subjects are the split's dev children instead of a
+random draw, and the held-out list is its test children; the reps are chosen as above.
+
+    python3 datasets/korea/pick_dev_subset.py --splits datasets/korea/splits.json --name dev   # the fixed dev split
     python3 datasets/korea/pick_dev_subset.py                       # 10 subjects x 3 reps -> dev_subset.json
     python3 datasets/korea/pick_dev_subset.py --subjects 8 --reps 2 --seed 1 --name dev_small
 """
@@ -63,6 +67,7 @@ def main():
     ap.add_argument('--min-frames', type=int, default=60, help='usable frames for a rep to count')
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--name', default='dev_subset')
+    ap.add_argument('--splits', default=None, help="make_splits.py's file: its dev children, not a random draw")
     ap.add_argument('--force', action='store_true', help='overwrite an existing subset file')
     args = ap.parse_args()
     require_out_dir()
@@ -77,16 +82,30 @@ def main():
         good = [(r, n, sig) for r, n, sig in reps if n >= args.min_frames]
         if len(good) >= args.reps:
             info[s] = dict(good=good, setups=len({sig for _, _, sig in reps}))
-    if len(info) < args.subjects:
-        raise SystemExit(f'only {len(info)} subjects have {args.reps} reps with >= {args.min_frames} usable frames')
-
     rng = random.Random(args.seed)
-    moved = sorted(s for s, v in info.items() if v['setups'] > 1)
-    rest = sorted(s for s in info if s not in moved)
-    rng.shuffle(moved)
-    rng.shuffle(rest)
-    k = min(args.moved, len(moved), args.subjects)
-    chosen = sorted(moved[:k] + rng.sample(sorted(moved[k:] + rest), args.subjects - k))
+    if args.splits:
+        with open(args.splits) as f:
+            sp = json.load(f)
+        missing = [s for s in sp['dev'] if s not in subjects]
+        short = [s for s in sp['dev'] if s in subjects and s not in info]
+        if missing:
+            print(f'dev children not laid out under OUT_DIR (step_1 them first): {", ".join(missing)}')
+        for s in short:                                       # a dev child keeps what usable reps it has
+            good = [(r, n, sig) for r, n, sig in survey(s) if n >= args.min_frames]
+            if good:
+                info[s] = dict(good=good, setups=len({sig for _, _, sig in survey(s)}))
+                print(f'  {s}: only {len(good)} reps with >= {args.min_frames} usable frames')
+        chosen = sorted(s for s in sp['dev'] if s in info)
+        moved = sorted(s for s, v in info.items() if v['setups'] > 1)
+    else:
+        if len(info) < args.subjects:
+            raise SystemExit(f'only {len(info)} subjects have {args.reps} reps with >= {args.min_frames} usable frames')
+        moved = sorted(s for s, v in info.items() if v['setups'] > 1)
+        rest = sorted(s for s in info if s not in moved)
+        rng.shuffle(moved)
+        rng.shuffle(rest)
+        k = min(args.moved, len(moved), args.subjects)
+        chosen = sorted(moved[:k] + rng.sample(sorted(moved[k:] + rest), args.subjects - k))
 
     trials = {}
     for s in chosen:
@@ -100,9 +119,10 @@ def main():
         pick += [r for r, _, _ in good if r not in pick]
         trials[s] = sorted(pick[:args.reps])
 
-    held_out = [s for s in subjects if s not in trials]
+    held_out = sp['test'] if args.splits else [s for s in subjects if s not in trials]
     doc = dict(name=args.name, seed=args.seed,
-               criteria=dict(subjects=args.subjects, reps=args.reps, moved=args.moved, min_frames=args.min_frames),
+               criteria=dict(subjects=args.subjects, reps=args.reps, moved=args.moved, min_frames=args.min_frames,
+                             splits=args.splits),
                trials=trials, held_out=held_out)
     with open(path, 'w') as f:
         json.dump(doc, f, indent=1)
