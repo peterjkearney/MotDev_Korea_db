@@ -135,6 +135,8 @@ CHAIN = {
     # so the 2D can correct MotionBERT's head orientation (before, nothing did: Nose/Head were out of every term)
     'C21': dict(_C14, shape='kid_oprg', joints='oprf', exclude_2d='Spine',
                 note='C19 + nose and ears (mesh vertices) in the 2D term'),
+    # is the girth prior still needed once the widths are fair evidence?
+    'C22': dict(_C14, shape='kid_oprw', joints='opr', note='C20 without the girth prior (girth from the widths)'),
 }
 
 # one component removed from the child recipe at a time

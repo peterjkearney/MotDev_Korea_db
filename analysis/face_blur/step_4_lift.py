@@ -153,7 +153,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--action', default='P03_CMJM_01')
     ap.add_argument('--conds', nargs='+', default=['reenc', 'haar', 'deface', 'oracle'], choices=CONDITIONS)
-    ap.add_argument('--dets', nargs='+', default=list(DETECTORS), choices=DETECTORS)
+    ap.add_argument('--dets', nargs='+', default=list(DETECTORS), choices=DETECTORS + ('openpose',),
+                    help='openpose: from step_2b_openpose (run on Colab)')
     ap.add_argument('--lifters', nargs='+', default=list(DEFAULT_LIFTERS), choices=LIFTERS)
     ap.add_argument('--cams', nargs='+', default=CAMS)
     ap.add_argument('--thresh-px', type=float, default=20.0)
@@ -167,12 +168,10 @@ def main():
     models = {}
     for cond in args.conds:
         for d in args.dets:
-            if not all(os.path.exists(det_path(args.action, cond, d, c)) for c in args.cams):
-                print(f'{cond}/{d}: 2D missing for some cameras -- skipped')
-                continue
-            h2d = {c: coco_to_h36m(np.load(det_path(args.action, cond, d, c))['coco']) for c in args.cams}
+            cams = [c for c in args.cams if os.path.exists(det_path(args.action, cond, d, c))]
+            h2d = {c: coco_to_h36m(np.load(det_path(args.action, cond, d, c))['coco']) for c in cams}
 
-            for c in args.cams:
+            for c in cams:
                 p = lift_path(args.action, cond, d, c)
                 if os.path.exists(p) and not args.force:
                     continue
@@ -196,6 +195,9 @@ def main():
                 print(f'{cond}/{d}/{c}: lifted ({detected.mean():.0%} of frames detected)', flush=True)
 
             p = tri_path(args.action, cond, d)
+            if cams != list(args.cams):          # a triangulation from fewer cameras is not comparable
+                print(f'{cond}/{d}: 2D missing for {sorted(set(args.cams) - set(cams))} -- not triangulated')
+                continue
             if os.path.exists(p) and not args.force:
                 continue
             xy = np.stack([h2d[c][..., :2] for c in args.cams], axis=1)                  # (T,C,17,2)

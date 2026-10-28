@@ -105,7 +105,7 @@ class Oracle:
         r = self.cam.K[0, 0] * ORACLE_RADIUS_MM / self.cam.depth(c)
         return _clip([(uv[0] - r, uv[1] - r, uv[0] + r, uv[1] + r, 1.0)], frame.shape[1], frame.shape[0])
 
-    apply = Deface.apply
+    apply = staticmethod(Deface.apply)
 
 
 def inside(regions, shape, pts):

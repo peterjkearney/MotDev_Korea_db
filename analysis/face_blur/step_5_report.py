@@ -15,14 +15,19 @@ report/anonymiser.csv  per method x camera: recall (face visible to the camera
 report/twod.csv        per condition x detector x camera: detection rate, median
                        and 95th-percentile keypoint shift (px and % of the
                        subject's height in the image) for face and body joints,
-                       mean confidence change, body-joint error to the
-                       projected mocap
+                       mean confidence change, and two unblurred yardsticks:
+                       body-joint jitter (frame-to-frame noise, the projected
+                       mocap's real motion removed) and disagreement with the
+                       other detectors.  Distance to mocap is not used: joint
+                       conventions differ (mocap joint centres vs annotated
+                       surface landmarks), which would overstate detector noise
 report/twod_joints.csv the same shift per COCO joint, pooled over cameras
 report/lift.csv        per condition x detector x camera x lifter: PA-MPJPE to
                        mocap (mocap's 15 marker-backed joints), its change from
                        baseline, and how far blur moved the body joints and the
-                       Nose/Head joints (mm, each aligned to mocap)
-report/tri.csv         the same for the all-camera triangulation, no alignment
+                       Nose/Head joints (median mm, each aligned to mocap)
+report/tri.csv         the same for the all-camera triangulation, no alignment (shifts are
+                       medians: a few failed frames dominate a mean)
 report/summary.md      the headline tables
 """
 import argparse
@@ -33,12 +38,13 @@ import numpy as np
 import pandas as pd
 
 from common import (Trial, det_path, faces_path, head_path, lift_path, tri_path, out_dir, procrustes_fit,
-                    CAMS, BASELINE, FACE, COCO_NAMES, H36M_NAMES)
+                    CAMS, BASELINE, FACE, COCO_NAMES, H36M_NAMES, H36M_TO_COCO_LIMBS)
 from blur import inside
 from utils.metrics import pa_mpjpe
 
 BODY = [j for j in range(17) if j not in FACE]
 HEAD_H36M = [9, 10]
+COCO_TO_H36M_BODY = {c: h for h, c in H36M_TO_COCO_LIMBS.items()}
 CONF = 0.3
 
 
@@ -91,6 +97,35 @@ def _height_px(coco):
     return np.nanmax(k[..., 1], 1) - np.nanmin(k[..., 1], 1)
 
 
+def _jitter_px(coco, mocap2d):
+    """The detector's own frame-to-frame noise on the body joints, unblurred.  The second-difference
+    residual x[t] - (x[t-1] + x[t+1]) / 2 of a keypoint is noise plus the joint's real acceleration;
+    subtracting the same residual of the projected mocap (smooth, same motion) leaves the noise.  For
+    independent per-frame noise of size s that residual has size s * sqrt(1.5), so it is divided out.
+    The detector's convention offset from mocap is slow-varying and cancels too."""
+    out = []
+    for cj, h in COCO_TO_H36M_BODY.items():
+        k, m = coco[:, cj], mocap2d[:, h]
+        ok = (k[:, 2] >= CONF) & np.isfinite(m).all(1)
+        ok3 = ok[1:-1] & ok[:-2] & ok[2:]
+        r = lambda x: x[1:-1] - (x[:-2] + x[2:]) / 2                       # noqa: E731
+        d = r(k[:, :2]) - r(m)
+        out += list(np.linalg.norm(d[ok3], axis=1) / np.sqrt(1.5))
+    return np.median(out) if out else np.nan
+
+
+def _disagreement_px(coco, others):
+    """Median distance from this detector's unblurred body keypoints to each other detector's on the
+    same frames, averaged over the other detectors: how far apart models already are before any blur."""
+    per = []
+    for o in others:
+        ok = (coco[..., 2] >= CONF) & (o[..., 2] >= CONF)
+        ok[:, FACE] = False
+        if ok.any():
+            per.append(np.median(np.linalg.norm(coco[..., :2] - o[..., :2], axis=-1)[ok]))
+    return np.mean(per) if per else np.nan
+
+
 def twod_tables(action, trial, conds, dets):
     rows, joint_rows = [], []
     for d in dets:
@@ -101,6 +136,9 @@ def twod_tables(action, trial, conds, dets):
             b = np.load(bp)
             m2 = trial.mocap2d(cam)
             hpx = np.nanmedian(_height_px(b['coco']))
+            others = [np.load(det_path(action, BASELINE, o, cam))['coco'] for o in dets
+                      if o != d and os.path.exists(det_path(action, BASELINE, o, cam))]
+            jitter, disagree = _jitter_px(b['coco'], m2), _disagreement_px(b['coco'], others)
             for cond in conds:
                 cp = det_path(action, cond, d, cam)
                 if not os.path.exists(cp):
@@ -120,12 +158,8 @@ def twod_tables(action, trial, conds, dets):
                     row[f'{part}_conf_change'] = dc.mean() if dc.size else np.nan
                     row[f'{part}_frames_lost'] = np.mean((b['coco'][both][:, js, 2] >= CONF)
                                                          & (c['coco'][both][:, js, 2] < CONF)) if both.any() else np.nan
-                err = []
-                for h, cj in [(1, 12), (2, 14), (3, 16), (4, 11), (5, 13), (6, 15),
-                              (11, 5), (12, 7), (13, 9), (14, 6), (15, 8), (16, 10)]:
-                    m = both & (c['coco'][:, cj, 2] >= CONF) & np.isfinite(m2[:, h]).all(1)
-                    err += list(np.linalg.norm(c['coco'][m, cj, :2] - m2[m, h], axis=1))
-                row['body_err_to_mocap_px'] = np.median(err) if err else np.nan
+                row['body_jitter_px'] = jitter           # unblurred yardsticks for the shifts above
+                row['body_disagree_px'] = disagree
                 rows.append(row)
                 for j in range(17):
                     s = shift[:, j][ok[:, j]]
@@ -176,8 +210,8 @@ def lift_table(action, trial, conds, dets):
                     rows.append(dict(cond=cond, det=d, cam=cam, lifter=lf, frames=int(both.sum()),
                                      pa_mpjpe_baseline=np.nanmean(e_b), pa_mpjpe=np.nanmean(e_c),
                                      pa_mpjpe_change=np.nanmean(e_c) - np.nanmean(e_b),
-                                     body_shift_mm=np.nanmean(sh[:, body]),
-                                     head_shift_mm=np.nanmean(sh[:, HEAD_H36M])))
+                                     body_shift_mm=np.nanmedian(sh[:, body]),
+                                     head_shift_mm=np.nanmedian(sh[:, HEAD_H36M])))
     return pd.DataFrame(rows)
 
 
@@ -200,9 +234,9 @@ def tri_table(action, trial, conds, dets):
             sh = np.linalg.norm(Xc - Xb, axis=-1)
             row = dict(cond=cond, det=d, mpjpe_baseline=err(Xb), mpjpe=err(Xc), mpjpe_change=err(Xc) - err(Xb),
                        solved=np.isfinite(Xc[..., 0]).mean(), solved_baseline=np.isfinite(Xb[..., 0]).mean(),
-                       body_shift_mm=np.nanmean(sh[:, mask]), head_shift_mm=np.nanmean(sh[:, HEAD_H36M]))
+                       body_shift_mm=np.nanmedian(sh[:, mask]), head_shift_mm=np.nanmedian(sh[:, HEAD_H36M]))
             for j in range(17):
-                row[f'shift_{H36M_NAMES[j]}'] = np.nanmean(sh[:, j])
+                row[f'shift_{H36M_NAMES[j]}'] = np.nanmedian(sh[:, j])
             rows.append(row)
     return pd.DataFrame(rows)
 
@@ -236,7 +270,7 @@ def main():
           fmt(twod.groupby(['cond', 'det']).median(numeric_only=True).reset_index()[
               ['cond', 'det', 'detect_rate', 'detect_rate_baseline', 'face_shift_med_px', 'face_shift_p95_px',
                'body_shift_med_px', 'body_shift_p95_px', 'body_shift_med_pct', 'face_frames_lost',
-               'body_err_to_mocap_px']]) if len(twod) else '(none)',
+               'body_jitter_px', 'body_disagree_px']]) if len(twod) else '(none)',
           '\n## Lifted 3D (mean over cameras)\n',
           fmt(lift.groupby(['cond', 'det', 'lifter']).mean(numeric_only=True).reset_index()[
               ['cond', 'det', 'lifter', 'pa_mpjpe_baseline', 'pa_mpjpe', 'pa_mpjpe_change',

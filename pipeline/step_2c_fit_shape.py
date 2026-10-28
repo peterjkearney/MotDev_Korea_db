@@ -25,7 +25,8 @@ the body (joints='op_hs').  _opgw / _hsgw add the hip and shoulder widths back (
 joints follow OpenPose's definition).  step_4b runs these with joints='op' / 'op_hs'.
 adult_oprg / kid_oprg are the _s24g fits with the OpenPose vertex-regressor hips and shoulders (smpl_lite joints='opr',
 models/openpose_regressor.npz; the kid fit iterates on the kid weight the regressor depends on); _oprgw with the
-hip and shoulder widths.  step_4b runs these with joints='opr'.
+hip and shoulder widths; _oprw the widths WITHOUT the girth prior (girth from the widths and the light ridge only).
+step_4b runs these with joints='opr'.
 
 The segment lengths (utils/smpl_lite.SEGMENTS) are medians over every frame of every laid-out rep
 of the subject, in the target's own units (mm), so the fitted body is metric and step_4b does not
@@ -98,12 +99,16 @@ def fit_subject(user, targets, lin_adult, lin_kid, lin_adult24, lin_kid24, lin_o
             op[f'{body}_{tag}_fit_mm'] = seg_lengths_mm(lin, b, segs)
     # 'opr' (OpenPose vertex regressor): its hips/shoulders depend on the kid weight, which the kid fit sets --
     # fit with the regressor at the C14 shape's kid weight, move it to the fitted one, refit until it settles
-    for tag, segs, t in (('oprg', SEGMENTS_NO_WIDTH, tgt_nw), ('oprgw', SEGMENTS, tgt)):
-        fits = {'adult': (lin_op['opr', False],) + fit_betas(lin_op['opr', False], t, segs, girth=rings_adult, **gfit)}
+    # _oprw: the widths with NO girth prior (betas 1-9 only under the light lam_rest_girth ridge) -- does girth stay
+    # sensible once the widths, now fair evidence, are in?
+    for tag, segs, t, prior in (('oprg', SEGMENTS_NO_WIDTH, tgt_nw, True), ('oprgw', SEGMENTS, tgt, True),
+                                ('oprw', SEGMENTS, tgt, False)):
+        ra, rk = (rings_adult, rings_kid) if prior else (None, None)
+        fits = {'adult': (lin_op['opr', False],) + fit_betas(lin_op['opr', False], t, segs, girth=ra, **gfit)}
         kw = float(kid_s24g[-1])
         for _ in range(4):
             lin = load_linear(10, kid=True, joints='opr', opr_kw=kw)
-            b, rms = fit_betas(lin, t, segs, girth=rings_kid, **gfit)
+            b, rms = fit_betas(lin, t, segs, girth=rk, **gfit)
             settled, kw = abs(b[-1] - kw) < 0.005, float(b[-1])
             if settled:
                 break
@@ -113,6 +118,8 @@ def fit_subject(user, targets, lin_adult, lin_kid, lin_adult24, lin_kid24, lin_o
             op[f'{body}_{tag}_rms_mm'] = rms
             op[f'{body}_{tag}_height_m'] = mesh_height_m(lin, b)
             op[f'{body}_{tag}_fit_mm'] = seg_lengths_mm(lin, b, segs)
+            g = girths_mm(lin, b, rings_kid if body == 'kid' else rings_adult)
+            op[f'{body}_{tag}_girth_mm'] = np.array([g[k] for k in g])
     adult_nw, rms_anw = fit_betas(mid_adult, tgt_nw, SEGMENTS_NO_WIDTH, lam=args.lam, sigma_mm=args.sigma_mm,
                                   lam_rest=args.lam_rest)
     kid_nw, rms_knw = fit_betas(mid_kid, tgt_nw, SEGMENTS_NO_WIDTH, lam=args.lam, sigma_mm=args.sigma_mm,
@@ -158,7 +165,7 @@ def cohort(args):
     if not files:
         raise SystemExit(f'no {{user}}/shapes.npz under {OUT_DIR} -- fit the subjects first')
     subs, kids, adults, more = [], [], [], {'kid_nw': [], 'kid_s24': [], 'kid_s24g': [], 'kid_opg': [], 'kid_opgw': [], 'kid_hsg': [],
-                                            'kid_hsgw': [], 'kid_hwg': [], 'kid_oprg': [], 'kid_oprgw': []}
+                                            'kid_hsgw': [], 'kid_hwg': [], 'kid_oprg': [], 'kid_oprgw': [], 'kid_oprw': []}
     for p in files:
         z = np.load(p, allow_pickle=True)
         subs.append(os.path.basename(os.path.dirname(p)))
