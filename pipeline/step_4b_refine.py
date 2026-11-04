@@ -285,6 +285,11 @@ def run_camera(user, action, detector, cam, cid, cfg, shapes, device, log):
     w_obs[~pnp_ok] = 0.0
     w_obs[:, ~use_joint] = 0.0
     frame_ok = (w_obs > 0).sum(1) >= 6
+    unknown = set(cfg.get('w_2d_scale') or {}) - set(H36M)
+    if unknown:
+        raise ValueError(f'w_2d_scale: unknown H36M joint(s) {sorted(unknown)}')
+    for j, m in (cfg.get('w_2d_scale') or {}).items():           # per-joint multiplier on the 2D term (default 1)
+        w_obs[:, H36M.index(j)] *= float(m)
     w_obs[~frame_ok] = 0.0
 
     # --- foot contact from the 2D

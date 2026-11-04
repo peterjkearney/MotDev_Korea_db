@@ -105,7 +105,7 @@ def load_h36m_regressor():
 SMPL24_FOR_H36M = {'RHip': 'R_Hip', 'RKnee': 'R_Knee', 'RAnkle': 'R_Ankle', 'LHip': 'L_Hip', 'LKnee': 'L_Knee',
                    'LAnkle': 'L_Ankle', 'LShoulder': 'L_Shoulder', 'LElbow': 'L_Elbow', 'LWrist': 'L_Wrist',
                    'RShoulder': 'R_Shoulder', 'RElbow': 'R_Elbow', 'RWrist': 'R_Wrist'}
-JOINTS = ('h36m', 'smpl24', 'op', 'op_hs', 'op_hw', 'opr', 'oprf')
+JOINTS = ('h36m', 'smpl24', 'op', 'op_hs', 'op_hw', 'opr', 'oprf', 'oprc')
 
 # OpenPose-style hips and shoulders as a VERTEX regressor ('opr'): SMPL-24's H36M-17 with LHip/RHip/LShoulder/RShoulder
 # replaced by fixed vertex weights (w + kid_weight * u), calibrated by analysis/joint_calib (smpl_op_fit.py:
@@ -118,17 +118,24 @@ OPR_KEYPOINTS = ('LHip', 'RHip', 'LShoulder', 'RShoulder')
 # OpenPose vertex ids for SMPL; analysis/joint_calib/smpl_op_fit.py fits them to ~8-15 mm)
 OPRF_FACE = {'Nose': {332: 1.0}, 'Head': {583: 0.5, 4071: 0.5}}
 OPR_CANDIDATES = [os.environ.get('OPENPOSE_REGRESSOR'), os.path.join(MODELS_DIR, 'openpose_regressor.npz')]
+# 'oprc' is 'oprf' with the face CALIBRATED like the hips: Nose and the two ears as vertex regressors (w + kw * u)
+# fitted to triangulated OpenPose (analysis/joint_calib/face_regressor.py, train split); smplx's single vertices
+# put children's ears 6-11 mm low and the nose 5-7 mm forward.  OPENPOSE_FACE_REGRESSOR, else models/.
+FACE_CANDIDATES = [os.environ.get('OPENPOSE_FACE_REGRESSOR'), os.path.join(MODELS_DIR, 'openpose_face_regressor.npz')]
 
 
-def opr_rows(kw):
-    """{keypoint: (6890,) vertex weights} at kid weight kw: w + kw * u (sum 1)."""
-    path = next((c for c in OPR_CANDIDATES if c and os.path.isfile(c)), None)
+def opr_rows(kw, face=False):
+    """{keypoint: (6890,) vertex weights} at kid weight kw: w + kw * u (sum 1).  face: Nose, LEar, REar from the
+    face regressor instead of the hips and shoulders."""
+    cands, name, env = ((FACE_CANDIDATES, 'openpose_face_regressor.npz', 'OPENPOSE_FACE_REGRESSOR') if face else
+                        (OPR_CANDIDATES, 'openpose_regressor.npz', 'OPENPOSE_REGRESSOR'))
+    path = next((c for c in cands if c and os.path.isfile(c)), None)
     if path is None:
-        raise SystemExit(f'openpose_regressor.npz not found (looked in {[c for c in OPR_CANDIDATES if c]}) -- '
-                         'copy analysis/joint_calib output there, or set OPENPOSE_REGRESSOR')
+        raise SystemExit(f'{name} not found (looked in {[c for c in cands if c]}) -- '
+                         f'copy analysis/joint_calib output there, or set {env}')
     z = np.load(path)
     rows = {}
-    for k in OPR_KEYPOINTS:
+    for k in (('Nose', 'LEar', 'REar') if face else OPR_KEYPOINTS):
         r = np.zeros(6890)
         r[z[f'{k}_vertices']] = z[f'{k}_weights_kw_w'] + float(kw) * z[f'{k}_weights_kw_u']
         rows[k] = r
@@ -220,20 +227,23 @@ def joint_regressor(joints='h36m', kw=0.0):
     'smpl24' the layout rebuilt from SMPL's J_regressor (SMPL24_FOR_H36M).  'op' regresses the same points
     as 'smpl24' (so does 'op_hs'): their offsets (op_offsets) are added by load_linear and MiniSMPL.
     'opr' is 'smpl24' with the hips and shoulders from the OpenPose vertex regressor at kid weight kw; 'oprf' also
-    takes Nose and Head from the face vertices (OPRF_FACE)."""
+    takes Nose and Head from the face vertices (OPRF_FACE); 'oprc' from the face regressor (Head = mid-ears)."""
     Jh = load_h36m_regressor()
     if joints == 'h36m':
         return Jh
-    if joints not in ('smpl24', 'opr', 'oprf') + tuple(OP_SETS):
+    if joints not in ('smpl24', 'opr', 'oprf', 'oprc') + tuple(OP_SETS):
         raise ValueError(f'unknown joints {joints!r} (one of {JOINTS})')
     Jr = _load_pkl()['J_regressor']
     Jr = Jr.toarray() if sp.issparse(Jr) else np.asarray(Jr, dtype=np.float64)
     out = Jh.copy()                                                  # Nose, Head stay H36M's
     for h, s in SMPL24_FOR_H36M.items():
         out[J[h]] = Jr[SMPL24.index(s)]
-    if joints in ('opr', 'oprf'):
+    if joints in ('opr', 'oprf', 'oprc'):
         for k, r in opr_rows(kw).items():
             out[J[k]] = r
+    if joints == 'oprc':
+        f = opr_rows(kw, face=True)
+        out[J['Nose']], out[J['Head']] = f['Nose'], 0.5 * (f['LEar'] + f['REar'])
     if joints == 'oprf':
         for k, w in OPRF_FACE.items():
             out[J[k]] = 0.0
@@ -277,7 +287,7 @@ def load_linear(n_betas=10, kid=False, joints='h36m', opr_kw=0.0):
         S = np.concatenate([S, kid_shapedir(v_t)[:, :, None]], axis=2)
     Jr = joint_regressor(joints, kw=opr_kw)
     J0, A = Jr @ v_t, np.einsum('jv,vck->jck', Jr, S)
-    if joints in OP_SETS or joints in ('opr', 'oprf'):
+    if joints in OP_SETS or joints in ('opr', 'oprf', 'oprc'):
         # OpenPose-style joints are not on the rotation centres, so their segment lengths depend on the pose: the
         # T-pose would turn the shoulders' lateral offset along the upper arm.  They are measured in FIT_POSE
         # (standing, arms down, as most target frames are) on the skinned model step_4b uses (MiniSMPL: joints

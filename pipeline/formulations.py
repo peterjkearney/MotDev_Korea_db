@@ -21,6 +21,7 @@ A configuration is one way of turning MotionBERT's pass-1 rotations into a place
                  'opr'         SMPL-24 with the hips and shoulders from the OpenPose vertex regressor (smpl_lite.opr_rows,
                                models/openpose_regressor.npz), which moves with the body's kid weight
                  'oprf'        'opr' with Nose / Head as the mesh's nose vertex / mid-ear vertices (OpenPose's points)
+                 'oprc'        'oprf' with the nose and ears calibrated as vertex regressors (models/openpose_face_regressor.npz)
                  'op_hs'       only the hip and shoulder offsets across the body (lateral, forward): the along-limb
                                offsets carry BioCV mocap's joint-centre conventions (smpl_lite.OP_SETS)
     placement    'pnp'         step_4's rigid PnP per frame + RTS root smoothing; no refinement
@@ -42,6 +43,8 @@ A configuration is one way of turning MotionBERT's pass-1 rotations into a place
                  floor stays within com_margin_m of the convex hull of the grounded feet's sole points
                  (heel, toe, medial, lateral per foot) (m^-2; 0 = off)
     com_margin_m slack outside the base of support before the hinge bites, metres
+    w_2d_scale   {H36M joint: multiplier} on that joint's weight in the reprojection term (default 1); the
+                 6-joint frame check counts joints before it, so a down-weighted joint still counts
     pull_scale   {SMPL-24 joint: multiplier} on w_pull for that joint's pull toward MotionBERT's angle (default 1):
                  freedom where MotionBERT under-reproduces flexion along the line of sight
     foot_lowest_margin_m  swing-foot veto in 3D: an ankle this far above the other in MotionBERT's skeleton (lab
@@ -70,7 +73,7 @@ DEFAULTS = dict(shape='motionbert', joints='h36m', placement='ray_const', body=T
                 w_foot=0.0, w_floor=0.0, w_floor_contact=0.0, floor_contact_m=0.025,
                 w_com=0.0, com_margin_m=0.03, com_support='any',
                 hidden_foot_contact=False, hidden_foot_dz_m=0.03, hidden_foot_speed_m_s=0.3, foot_lowest_margin_m=0.0,
-                w_pull=30.0, pull_scale={}, w_smooth=30.0, w_trans_acc=1e4, sigma_px=5.0, huber=20.0,
+                w_pull=30.0, pull_scale={}, w_2d_scale={}, w_smooth=30.0, w_trans_acc=1e4, sigma_px=5.0, huber=20.0,
                 conf_thresh=0.3, stance_sec=1.5,
                 min_contact_s=0.1, foot_speed_px_s=90.0, foot_lowest_margin_px=30.0,
                 iters_global=60, iters=300)
@@ -137,6 +140,14 @@ CHAIN = {
                 note='C19 + nose and ears (mesh vertices) in the 2D term'),
     # is the girth prior still needed once the widths are fair evidence?
     'C22': dict(_C14, shape='kid_oprw', joints='opr', note='C20 without the girth prior (girth from the widths)'),
+    # C21 tips the head ~8 deg too far up on dev (C19 ~7.5 deg down): the face points at part weight
+    'C23': dict(_C14, shape='kid_oprg', joints='oprf', exclude_2d='Spine', w_2d_scale={'Nose': 0.5, 'Head': 0.5},
+                note='C21 with the nose and ears at half weight in the 2D term'),
+    'C24': dict(_C14, shape='kid_oprg', joints='oprf', exclude_2d='Spine', w_2d_scale={'Nose': 0.25, 'Head': 0.25},
+                note='C21 with the nose and ears at quarter weight in the 2D term'),
+    # smplx's face vertices miss OpenPose's on children (ears low, nose forward): calibrated face, full weight
+    'C25': dict(_C14, shape='kid_oprg', joints='oprc', exclude_2d='Spine',
+                note='C21 with the nose and ears calibrated (face vertex regressor)'),
 }
 
 # one component removed from the child recipe at a time

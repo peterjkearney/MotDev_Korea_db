@@ -218,6 +218,8 @@ def main():
         for u in todo:
             print(f'  {u}: {len(subs[u])} reps')
         return
+    if not todo:                                                   # skip building the linear models
+        return
     lin_adult, lin_kid = load_linear(10), load_linear(10, kid=True)
     lin_adult24, lin_kid24 = load_linear(10, joints='smpl24'), load_linear(10, kid=True, joints='smpl24')
     lin_op = {(j, k): load_linear(10, kid=k, joints=j) for j in ('op', 'op_hs', 'op_hw') for k in (False, True)}
