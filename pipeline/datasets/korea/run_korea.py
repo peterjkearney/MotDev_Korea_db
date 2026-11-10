@@ -26,6 +26,14 @@ subset subject's shape from all of that subject's reps) and writes its tables to
 apart from the full set's.  The subjects left out are the held-out set: run them once, at the end.
 
     python3 datasets/korea/run_korea.py --gt3d ... --from step_2c --subset dev_subset --configs C8,C13
+
+MotionBERT window length (--clip-len, step_2a; default 81): clone the subset into a fresh OUT_DIR
+(datasets/korea/clone_out_dir.py copies step_1's layout and step_2c's shapes, nothing MotionBERT made),
+point BIOCV_OUT at it and run from step_2a, skipping step_2c so the shapes stay the copied ones:
+
+    python3 datasets/korea/run_korea.py --gt3d ... --subset dev_subset --from step_2a --until step_4 --clip-len 16
+    python3 datasets/korea/run_korea.py --gt3d ... --subset dev_subset --from step_4b --configs C8,C25
+    python3 tools/compare_runs.py --a {old}/dev_subset/results_table_tri.csv --b {new}/dev_subset/results_table_tri.csv
 """
 import argparse
 import os
@@ -60,6 +68,12 @@ def main():
     ap.add_argument('--from', dest='start', default='step_1', choices=STAGES, help='resume from this stage')
     ap.add_argument('--until', default='tables', choices=STAGES, help='stop after this stage')
     ap.add_argument('--device', default='auto', help='step_4b: cpu | cuda | auto')
+    ap.add_argument('--tri', choices=['all', 'loo'], default='all',
+                    help="step_8 and the tables: score against the all-camera target (default) or each camera's "
+                         'leave-one-out one (separate files: error_metrics_tri_loo.npz, results_table_tri_loo.csv)')
+    ap.add_argument('--clip-len', type=int, default=None,
+                    help="step_2a's MotionBERT window (default: step_2a's, 81); use a fresh OUT_DIR per length "
+                         '(datasets/korea/clone_out_dir.py)')
     ap.add_argument('--stop-on-fail', action='store_true')
     args = ap.parse_args()
     require_out_dir()
@@ -78,12 +92,14 @@ def main():
         return [*(['--user', u] if u else []), *(['--action', a] if a else [])]
 
     table_args = ['--subset', args.subset] if subset else []
-    compare_args = ['--table', os.path.join(subset_dir(name), 'results_table_tri.csv')] if subset else []
+    tname = 'results_table_tri.csv' if args.tri == 'all' else 'results_table_tri_loo.csv'
+    compare_args = ['--table', os.path.join(subset_dir(name) if subset else OUT_DIR, tname)]
     i0, i1 = STAGES.index(args.start), STAGES.index(args.until)
     if i1 < i0:
         raise SystemExit(f'--until {args.until} comes before --from {args.start}')
     stages = STAGES[i0:i1 + 1]
     print(f'OUT_DIR {OUT_DIR}\nstages  {", ".join(stages)}' +
+          (f'\nclip_len {args.clip_len} (step_2a)' if args.clip_len else '') + f'\ntarget  {args.tri}' +
           (f'\nsubset  {name}: {len(units())} trials of {len(users)} subjects' if subset else
            f'\nusers   {", ".join(users)}' if users else ''))
     ok = True
@@ -93,7 +109,8 @@ def main():
         elif st in ('step_2a', 'step_2b', 'step_3', 'step_4'):
             script = {'step_2a': 'step_2a_extract_betas.py', 'step_2b': 'step_2b_finalise_betas.py',
                       'step_3': 'step_3_extract_3d.py', 'step_4': 'step_4_PnP.py'}[st]
-            extra = ['--exclude-joints', 'Hip,RHip,LHip'] if st == 'step_4' else []
+            extra = ['--exclude-joints', 'Hip,RHip,LHip'] if st == 'step_4' else \
+                    ['--clip-len', str(args.clip_len)] if st == 'step_2a' and args.clip_len else []
             ok = all([run(script, *sel(u, a), *extra) for u, a in units()])
         elif st == 'step_2c':
             ok = all([run('step_2c_fit_shape.py', *sel(u)) for u in (users or [None])]) \
@@ -107,18 +124,18 @@ def main():
                 ok = True
                 for a in (subset[u] if subset else [None]):
                     ok = run('step_4b_refine.py', *sel(u, a), '--configs', args.configs, '--device', args.device) and ok
-                    ok = run('step_8_spider_error.py', *sel(u, a), '--gt', 'triangulated') and ok
-                    ok = run('step_8_spider_error.py', *sel(u, a), '--gt', 'triangulated', '--config', 'all') and ok
-                run('tools/results_table.py', '--gt', 'triangulated', *table_args)
+                    ok = run('step_8_spider_error.py', *sel(u, a), '--gt', 'triangulated', '--tri', args.tri) and ok
+                    ok = run('step_8_spider_error.py', *sel(u, a), '--gt', 'triangulated', '--tri', args.tri, '--config', 'all') and ok
+                run('tools/results_table.py', '--gt', 'triangulated', '--tri', args.tri, *table_args)
                 run('tools/compare_configs.py', *compare_args)
                 if not ok and args.stop_on_fail:
                     break
         elif st == 'step_8':
-            ok = all([run('step_8_spider_error.py', *sel(u, a), '--gt', 'triangulated')
-                      and run('step_8_spider_error.py', *sel(u, a), '--gt', 'triangulated', '--config', 'all')
+            ok = all([run('step_8_spider_error.py', *sel(u, a), '--gt', 'triangulated', '--tri', args.tri)
+                      and run('step_8_spider_error.py', *sel(u, a), '--gt', 'triangulated', '--tri', args.tri, '--config', 'all')
                       for u, a in units()])
         elif st == 'tables':
-            ok = run('tools/results_table.py', '--gt', 'triangulated', *table_args) and run('tools/compare_configs.py', *compare_args)
+            ok = run('tools/results_table.py', '--gt', 'triangulated', '--tri', args.tri, *table_args) and run('tools/compare_configs.py', *compare_args)
         if not ok and args.stop_on_fail:
             print(f'stopping at {st}')
             break

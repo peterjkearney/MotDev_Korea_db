@@ -12,6 +12,7 @@ metric each: tools/compare_configs.py makes them, with the paired differences pe
     python3 tools/results_table.py --gt triangulated --out /content/drive/.../results_table_tri_KOREA.csv
     python3 tools/results_table.py --gt mocap --detector yolo --out .../results_table_BioCV.csv
     python3 tools/results_table.py --subset dev_subset      # only the subset's trials -> {OUT_DIR}/dev_subset/
+    python3 tools/results_table.py --tri loo --subset dev   # step_8 --tri loo scores -> results_table_tri_loo.csv
 """
 import argparse
 import csv
@@ -31,21 +32,28 @@ import formulations  # noqa: E402
 SERIES = ('placed_all', 'placed_conf', 'smooth_all', 'smooth_conf')
 
 
-def trials_with_metrics(detector, gt):
+def table_name(gt, tri='all'):
+    """results_table.csv (mocap), results_table_tri.csv (all-camera target), results_table_tri_loo.csv (leave-one-out)."""
+    return 'results_table.csv' if gt == 'mocap' else 'results_table_tri.csv' if tri == 'all' else 'results_table_tri_loo.csv'
+
+
+def trials_with_metrics(detector, gt, tri='all'):
     """[(user, action, config)] for every error_metrics file, step_4's as config 'step4'."""
     out = []
-    for p in sorted(glob.glob(metrics_path('*', '*', detector, gt))):
+    for p in sorted(glob.glob(metrics_path('*', '*', detector, gt, None, tri))):
         u, a = os.path.relpath(p, OUT_DIR).split(os.sep)[:2]
         out.append((u, a, 'step4'))
     for cid in formulations.ORDER:
-        for p in sorted(glob.glob(metrics_path('*', '*', detector, gt, cid))):
+        for p in sorted(glob.glob(metrics_path('*', '*', detector, gt, cid, tri))):
             u, a = os.path.relpath(p, OUT_DIR).split(os.sep)[:2]
             out.append((u, a, cid))
     return out
 
 
-def rows_for(user, action, cid, detector, gt):
-    m = np.load(metrics_path(user, action, detector, gt, None if cid == 'step4' else cid), allow_pickle=True)
+def rows_for(user, action, cid, detector, gt, tri='all'):
+    m = np.load(metrics_path(user, action, detector, gt, None if cid == 'step4' else cid, tri), allow_pickle=True)
+    if gt == 'triangulated' and 'tri' in m.files and str(m['tri']) != tri:
+        raise ValueError(f"file was scored against the '{m['tri']}' target, not '{tri}'")
     names = [str(x) for x in m['joint_names']]
     cams = [str(c) for c in m['cameras']]
     stature = float(m['stature_mm']) if 'stature_mm' in m.files and np.isfinite(float(m['stature_mm'])) else np.nan
@@ -53,7 +61,8 @@ def rows_for(user, action, cid, detector, gt):
     cfg = formulations.CONFIGS.get(cid, {})
     rows = []
     for i, cam in enumerate(cams):
-        row = dict(user=user, action=action, camera=cam, config=cid, gt=gt, detector=detector,
+        row = dict(user=user, action=action, camera=cam, config=cid, gt=gt,
+                   tri=tri if gt == 'triangulated' else '', detector=detector,
                    n_cameras=len(cams), angle_deg=round(float(m['angles_deg'][i]), 1), n_frames=int(m['n_frames'][i]),
                    stature_mm='' if np.isnan(stature) else round(stature, 1))
         for key in ('shape', 'placement', 'body', 'exclude_2d', 'w_foot', 'w_floor', 'w_floor_contact', 'w_com', 'note'):
@@ -96,7 +105,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('--detector', choices=DETECTORS, default='openpose')
     ap.add_argument('--gt', choices=['mocap', 'triangulated'], default='triangulated')
-    ap.add_argument('--out', default=None, help='CSV path (default {OUT_DIR}/results_table[_tri].csv)')
+    ap.add_argument('--tri', choices=['all', 'loo'], default='all',
+                    help="with --gt triangulated: step_8's all-camera scores (default) or its leave-one-out ones "
+                         '(step_8 --tri loo)')
+    ap.add_argument('--out', default=None,
+                    help='CSV path (default {OUT_DIR}/results_table.csv, results_table_tri.csv or results_table_tri_loo.csv)')
     ap.add_argument('--subset', default=None,
                     help="only this subset's trials (pick_dev_subset.py JSON, or its name under OUT_DIR); "
                          'default output {OUT_DIR}/{subset name}/')
@@ -106,17 +119,18 @@ def main():
     if args.subset:
         name, trials = read_subset(args.subset)
         root, keep = subset_dir(name), {(u, a) for u, acts in trials.items() for a in acts}
-    out = args.out or os.path.join(root, 'results_table.csv' if args.gt == 'mocap' else 'results_table_tri.csv')
+    out = args.out or os.path.join(root, table_name(args.gt, args.tri))
     rows = []
-    for u, a, cid in trials_with_metrics(args.detector, args.gt):
+    for u, a, cid in trials_with_metrics(args.detector, args.gt, args.tri):
         if keep is not None and (u, a) not in keep:
             continue
         try:
-            rows += rows_for(u, a, cid, args.detector, args.gt)
+            rows += rows_for(u, a, cid, args.detector, args.gt, args.tri)
         except Exception as e:
             print(f'{u}/{a} {cid}: skipped -- {type(e).__name__}: {e}')
     if not rows:
-        raise SystemExit(f'no error_metrics under {OUT_DIR} for {args.detector} vs {args.gt}')
+        raise SystemExit(f'no error_metrics under {OUT_DIR} for {args.detector} vs {args.gt}'
+                         + (f' ({args.tri})' if args.gt == 'triangulated' else ''))
     keys = []
     for r in rows:
         keys += [k for k in r if k not in keys]

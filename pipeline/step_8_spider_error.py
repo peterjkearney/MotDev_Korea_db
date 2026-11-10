@@ -354,7 +354,7 @@ def score_trial(user, action, cameras, args):
 
     draw_floor_map(ax_map, traj_xy, heading_xy, frame_ok, cam_data_by_label, subject_lab_xy)
 
-    out_path = _spider_path(user, action, args.detector, args.gt, args.config)
+    out_path = _spider_path(user, action, args.detector, args.gt, args.config, args.tri)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
@@ -362,8 +362,8 @@ def score_trial(user, action, cameras, args):
     # Machine-readable twin of the plot, for tools/results_table.py to aggregate
     # across trials. Rows follow the same angle-sorted camera order as the
     # chart, so index i means the same camera in both.
-    metrics_path = _metrics_path(user, action, args.detector, args.gt, args.config)
-    ex = [extras[i] for i in order]
+    metrics_path = _metrics_path(user, action, args.detector, args.gt, args.config, args.tri)
+    ex =[extras[i] for i in order]
     np.savez(metrics_path,
              gt=np.array(args.gt), tri=np.array(args.tri if args.gt == 'triangulated' else ''),
              detector=np.array(args.detector), stature_mm=np.array(stature_mm if stature_mm else np.nan),
@@ -402,11 +402,12 @@ def main():
     ap.add_argument('--cameras', default=None, help='comma-separated subset; default every camera with a PnP result')
     ap.add_argument('--conf-thresh', type=float, default=0.3)
     ap.add_argument('--gt', choices=['mocap', 'triangulated'], default='mocap',
-                    help='ground truth: mocap, or the triangulated OpenPose target '
-                         '(leave-one-out per camera -- the only option for Korea, and the like-for-like one for BioCV)')
+                    help='ground truth: mocap, or the triangulated OpenPose target (the only option for Korea, '
+                         'and the like-for-like one for BioCV)')
     ap.add_argument('--tri', choices=['all', 'loo'], default='all',
-                    help='with --gt triangulated: the all-camera solution (default) or, per camera, the '
-                         'leave-one-out target built without it')
+                    help='with --gt triangulated: the all-camera solution (default, error_metrics_tri.npz) or, per '
+                         'camera, the leave-one-out target built without it (error_metrics_tri_loo.npz -- its own '
+                         'file, so the two scorings never overwrite each other)')
     ap.add_argument('--verbose', action='store_true', help='print every camera, not just the trial summary')
     ap.add_argument('--force', action='store_true', help='redo trials already scored against this --gt')
     ap.add_argument('--dry-run', action='store_true', help='list what would be scored')
@@ -440,8 +441,8 @@ def score_all(args):
             print(msg + ' -- run step_4b_refine.py first')
             return
         raise SystemExit(msg + ' -- run step_4_PnP.py first')
-    todo = [t for t in sorted(by_trial) if args.force or not os.path.exists(_metrics_path(*t, args.detector, args.gt, args.config))]
-    print(f'{args.detector} vs {args.gt}' + (f' [{args.config}]' if args.config else '') + f': {len(by_trial)} trial(s) with '
+    todo = [t for t in sorted(by_trial) if args.force or not os.path.exists(_metrics_path(*t, args.detector, args.gt, args.config, args.tri))]
+    print(f'{args.detector} vs {args.gt}' + (f' ({args.tri})' if args.gt == 'triangulated' else '') +(f' [{args.config}]' if args.config else '') + f': {len(by_trial)} trial(s) with '
           f'PnP results under {_OUT_DIR}: {len(todo)} to score, {len(by_trial) - len(todo)} already done')
     if args.dry_run:
         for user, action in todo:

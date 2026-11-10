@@ -99,17 +99,27 @@ def features_path(user, action, detector, cam):
     return os.path.join(analysis_dir(user, action), 'features', detector, f'{cam}_features.npz')
 
 
-def metrics_path(user, action, detector, gt='mocap', config=None):
-    """step_8: per-camera error metrics against mocap ('mocap') or the triangulated target ('triangulated');
-    with a configuration id, the score of step_4b's placement for it, one folder down."""
+def _gt_suffix(gt, tri):
+    """'' (mocap), '_tri' (triangulated, all-camera target) or '_tri_loo' (leave-one-out target per camera)."""
+    if gt == 'mocap':
+        return ''
+    if tri not in ('all', 'loo'):
+        raise ValueError(f"tri must be 'all' or 'loo', not {tri!r}")
+    return '_tri' if tri == 'all' else '_tri_loo'
+
+
+def metrics_path(user, action, detector, gt='mocap', config=None, tri='all'):
+    """step_8: per-camera error metrics against mocap ('mocap') or the triangulated target ('triangulated',
+    tri 'all' = the all-camera solution, 'loo' = each camera's target built without it -- separate files, so
+    one scoring never overwrites the other); with a configuration id, step_4b's placement, one folder down."""
     return os.path.join(analysis_dir(user, action), 'diagnostics', detector, *([config] if config else []),
-                        'error_metrics.npz' if gt == 'mocap' else 'error_metrics_tri.npz')
+                        f'error_metrics{_gt_suffix(gt, tri)}.npz')
 
 
-def spider_path(user, action, detector, gt='mocap', config=None):
+def spider_path(user, action, detector, gt='mocap', config=None, tri='all'):
     """step_8: the error-by-camera chart that goes with metrics_path."""
     return os.path.join(analysis_dir(user, action), 'diagnostics', detector, *([config] if config else []),
-                        f'spider_error_{action}{"" if gt == "mocap" else "_tri"}.png')
+                        f'spider_error_{action}{_gt_suffix(gt, tri)}.png')
 
 
 def depth_video_path(user, action, cam):
