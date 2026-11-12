@@ -137,7 +137,7 @@ the CMU model server, which has been unreliable for years; the BODY_25
 weights may need fetching from a mirror).  Everything after it is batched:
 
 ```
-bash datasets/biocv/install_openpose_colab.sh /content/openpose        # 20-40 min, once per session
+bash datasets/biocv/install_openpose_colab.sh /content/openpose        # GPU runtime; ~1 min from the Drive tarball, else 20-40 min; once per session
 python3 datasets/biocv/run_openpose.py --openpose-bin /content/openpose/build/examples/openpose/openpose.bin \
                               --model-folder /content/openpose/models/ [--users P08 --actions ...]
 ```

@@ -23,6 +23,11 @@
 # was built at: the binary finds libopenpose/libcaffe through absolute RPATHs
 # into the build tree.  The apt libraries are runtime dependencies and are
 # reinstalled every session either way (fast).
+#
+# Needs a GPU runtime (Runtime -> Change runtime type -> T4 GPU): on a CPU
+# runtime there are no CUDA libraries and the binary fails with rc=127.  If the
+# image's CUDA is newer than the one the tarball was built on, the missing
+# runtime libraries are fetched as pip wheels (see cuda_libs below).
 set -euo pipefail
 
 ROOT=${1:-/content/openpose}
@@ -31,7 +36,45 @@ JOBS=$(nproc)
 BIN="$ROOT/build/examples/openpose/openpose.bin"
 MODEL="$ROOT/models/pose/body_25/pose_iter_584000.caffemodel"
 
+# CUDA runtime libraries the binary was linked against but this image lacks.
+# The tarball was built on a CUDA 12 image (libcudart.so.12, libcublas.so.12);
+# by Nov 2026 Colab's GPU image ships CUDA 13 (.so.13 -- libcurand keeps .so.10
+# across both, so it still resolves).  The driver runs CUDA 12 binaries, so the
+# CUDA 12 runtime libraries are installed as pip wheels and registered with the
+# dynamic loader (ld.so.conf.d + ldconfig) -- unlike LD_LIBRARY_PATH, that
+# holds for every later notebook cell.  A no-op when nothing is missing.
+cuda_libs() {
+    local missing
+    missing=$(ldd "$BIN" | awk '/not found/ {print $1}' | grep -E '^lib(cudart|cublas|cublasLt|curand)\.so\.' || true)
+    [ -z "$missing" ] && return 0
+    echo "### CUDA runtime libraries missing: $(echo $missing) ###"
+    local major pkgs=""
+    major=$(echo "$missing" | head -1 | sed 's/.*\.so\.//')
+    case "$missing" in *cudart*) pkgs="$pkgs nvidia-cuda-runtime-cu$major" ;; esac
+    case "$missing" in *cublas*) pkgs="$pkgs nvidia-cublas-cu$major" ;; esac
+    if echo "$missing" | grep -q curand; then
+        echo "libcurand missing too -- cannot tell its CUDA version from the .so name; trying cu$major"
+        pkgs="$pkgs nvidia-curand-cu$major"
+    fi
+    python3 -m pip -q install $pkgs
+    # register only the folders holding the missing libraries, so nothing else
+    # on the image (e.g. torch's own CUDA wheels) changes which libraries it loads
+    python3 - $missing > /etc/ld.so.conf.d/openpose-cuda.conf <<'PY'
+import glob, os, site, sys
+for d in sorted({os.path.dirname(p) for sp in site.getsitepackages() for name in sys.argv[1:]
+                 for p in glob.glob(f'{sp}/nvidia/*/lib/{name}')}):
+    print(d)
+PY
+    ldconfig
+    echo "registered: $(tr '\n' ' ' < /etc/ld.so.conf.d/openpose-cuda.conf)"
+    missing=$(ldd "$BIN" | awk '/not found/ {print $1}' || true)
+    if [ -n "$missing" ]; then
+        echo "still missing: $(echo $missing)"; exit 1
+    fi
+}
+
 smoke() {
+    cuda_libs
     echo; echo "binary : $BIN"; echo "model  : $MODEL ($(stat -c %s "$MODEL") bytes)"
     echo "smoke test:"; "$BIN" --help 2>&1 | head -3
 }
