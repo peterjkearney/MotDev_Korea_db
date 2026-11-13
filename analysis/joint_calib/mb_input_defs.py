@@ -45,7 +45,8 @@ from scipy.spatial.transform import Rotation
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(_ROOT, 'pipeline'))
-from step_2a_extract_betas import load_model, _reflect_index, _CLIP_LEN          # noqa: E402
+from step_2a_extract_betas import load_model, _reflect_index                     # noqa: E402
+_CLIP_LEN = 81      # the window its recorded results were made with (step_2a's default before 2026-11-13)
 from lib.utils.utils_data import crop_scale                                       # noqa: E402
 from utils.missing_joints import fill_missing                                     # noqa: E402
 from utils.calibration import load_calib                                          # noqa: E402

@@ -2,7 +2,7 @@
 """step_2a_extract_betas.py -- MotionBERT pass 1: per-frame SMPL rotations and betas.
 
 Runs MotionBERT-Mesh (whole-clip crop_scale, per-frame windowed inference,
---clip-len frames centred on each frame, default 81) on one detector's 2D and
+--clip-len frames centred on each frame, default 16) on one detector's 2D and
 keeps just the rotations (theta) and the per-frame betas; step_2b picks the
 body shape from them and step_3 builds the skeleton with it.
 
@@ -11,6 +11,12 @@ body shape from them and step_3 builds the skeleton with it.
 stored in the output; a camera done with a different length is refused unless
 --force (steps skip by file existence, so mixing would otherwise be silent --
 use a fresh OUT_DIR per length, see datasets/korea/clone_out_dir.py).
+Default 16 since 2026-11-13: on the 161 Korea dev reps raw MotionBERT placed error was
+100.1 mm at 16 vs 102.4 at 81 (PA 41.4 vs 42.5); 16 at stride 3 (10 fps) gave 103.2.
+Outputs made before then are 81 (files without the key); resume such a tree with --clip-len 81.
+--stride: frames between window samples (default 1).  Korea video is 30 fps, so
+--clip-len 16 --stride 3 feeds 16 frames at 10 fps (1.5 s), H36M's training rate;
+stored as 'stride' (files without it = 1) and guarded like --clip-len.
 
     reads   {OUT_DIR}/{user}/{action}/Analysis/keypoints/{detector}/{cam}_2d.npz
     writes  {OUT_DIR}/{user}/{action}/Analysis/mesh/{detector}/{cam}_betas.npz
@@ -59,13 +65,19 @@ _MB_MESH_CFG  = os.path.join(_MB_DIR, 'configs', 'mesh', 'MB_ft_pw3d.yaml')
 _MB_MESH_CKPT = os.path.join(_MB_DIR, 'checkpoint', 'mesh',
                                'FT_MB_release_MB_ft_pw3d', 'best_epoch.bin')
 
-_CLIP_LEN = 81      # default window; --clip-len overrides (mb_input_defs.py imports this)
+_CLIP_LEN = 16      # default window; --clip-len overrides (was 81 before 2026-11-13)
 
 
 def stored_clip_len(path):
     """Window length a {cam}_betas.npz was made with (files from before --clip-len existed were 81)."""
     z = np.load(path)
     return int(z['clip_len']) if 'clip_len' in z.files else 81
+
+
+def stored_stride(path):
+    """Frame step a {cam}_betas.npz was made with (files from before --stride existed were 1)."""
+    z = np.load(path)
+    return int(z['stride']) if 'stride' in z.files else 1
 
 def run_backbone(model, batch, clip_len, device):
     if device == 'cuda':
@@ -129,12 +141,13 @@ def extract(user, action, camera, mesh_model, device, args):
     clip_len = args.clip_len
     batch = torch.zeros(1, clip_len, 17, 3, dtype=torch.float32, device=device)
     half = clip_len // 2       # even lengths: half frames before, half-1 after (16 -> 8 back, 7 forward)
+    stride = args.stride       # frames between window samples; the centre sample is always frame_n
 
     all_rotmats = np.zeros((n_frames, 24, 3, 3), dtype=np.float32)
     all_betas = np.zeros((n_frames,10),dtype=np.float32)
 
     for frame_n in range(n_frames):
-        indices = [_reflect_index(frame_n - half + j, n_frames) for j in range(clip_len)] # array of indices for this window (accounting for relfecting at boundaries)
+        indices = [_reflect_index(frame_n + (j - half) * stride, n_frames) for j in range(clip_len)] # array of indices for this window (accounting for relfecting at boundaries)
         win_np = motion_norm[indices] # pulling batch of numpy 2D keypoints for frames in window
 
         with torch.no_grad():
@@ -152,7 +165,7 @@ def extract(user, action, camera, mesh_model, device, args):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     np.savez(out_path, rotmats=all_rotmats, betas=all_betas, avg_betas=np.mean(all_betas, axis=0),
              detector=np.array(args.detector), missing=np.array(args.missing), n_missing_joints=n_missing,
-             clip_len=clip_len)
+             clip_len=clip_len, stride=stride)
     return (f'{n_frames} frames' +(f', {n_missing} missing joints ({100 * n_missing / (n_frames * 17):.1f}%) '
                                     f'{"filled" if args.missing == "fill" else "left at zero"}' if n_missing else ''))
 
@@ -171,11 +184,15 @@ def main():
     ap.add_argument('--clip-len', type=int, default=_CLIP_LEN,
                     help=f'frames per MotionBERT window, centred on each frame (default {_CLIP_LEN}; '
                          'the mesh checkpoint was fine-tuned on 16, the backbone pretrained on 243)')
+    ap.add_argument('--stride', type=int, default=1,
+                    help='frames between window samples (default 1); 3 on 30 fps video = 10 fps, H36M\'s rate')
     ap.add_argument('--force', action='store_true', help='redo cameras whose output already exists')
     ap.add_argument('--dry-run', action='store_true', help='list what would be run, load nothing')
     args = ap.parse_args()
     if not 1 <= args.clip_len <= 243:
         raise SystemExit(f'--clip-len {args.clip_len}: the backbone takes 1-243 frames (maxlen)')
+    if args.stride < 1:
+        raise SystemExit(f'--stride {args.stride}: must be >= 1')
 
     require_out_dir()
     jobs = find_cameras(_twod_path, args.detector, args.user, args.action, set(args.cameras.split(',')) if args.cameras else None)
@@ -184,14 +201,16 @@ def main():
                          f'action={args.action or "*"} -- run step_1_extract_2d.py / step_1_openpose_2d.py first')
     done = [j for j in jobs if os.path.exists(_betas_path(j[0], j[1], args.detector, j[2]))]
     if not args.force:
-        other = [(j, n) for j in done if (n := stored_clip_len(_betas_path(j[0], j[1], args.detector, j[2]))) != args.clip_len]
+        want = (args.clip_len, args.stride)
+        other = [(j, n) for j in done if (n := (stored_clip_len(p := _betas_path(j[0], j[1], args.detector, j[2])),
+                                                stored_stride(p))) != want]
         if other:
-            raise SystemExit(f'{len(other)} camera(s) already done with a different --clip-len, e.g. '
-                             f'{"/".join(other[0][0])} at {other[0][1]} -- use a fresh OUT_DIR '
+            raise SystemExit(f'{len(other)} camera(s) already done with a different --clip-len/--stride, e.g. '
+                             f'{"/".join(other[0][0])} at clip_len {other[0][1][0]} stride {other[0][1][1]} -- use a fresh OUT_DIR '
                              f'(datasets/korea/clone_out_dir.py) or --force')
     todo = jobs if args.force else [j for j in jobs if j not in done]
     print(f'{args.detector}: {len(jobs)} camera(s) with 2D under {_OUT_DIR}: {len(todo)} to run, '
-          f'{len(jobs) - len(todo)} already done; clip_len {args.clip_len}')
+          f'{len(jobs) - len(todo)} already done; clip_len {args.clip_len}, stride {args.stride}')
     if args.dry_run:
         for user, action in sorted({(u, a) for u, a, _ in todo}):
             print(f'  {user}/{action}: {",".join(c for u, a, c in todo if (u, a) == (user, action))}')

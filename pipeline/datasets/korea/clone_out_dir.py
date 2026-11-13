@@ -16,6 +16,7 @@ triangulated bone lengths, not MotionBERT, so copying them keeps C9's cohort sha
 
     python3 datasets/korea/clone_out_dir.py --src /content/drive/.../Korea --dst /content/drive/.../Korea_clip16 --subset dev
     python3 datasets/korea/clone_out_dir.py --src ... --dst ... --subset dev --dry-run
+    python3 datasets/korea/clone_out_dir.py --src ... --dst ... --subset dev --all-reps   # every rep of the dev children
 """
 import argparse
 import glob
@@ -42,12 +43,18 @@ def main():
     ap.add_argument('--src', required=True, help='the existing OUT_DIR')
     ap.add_argument('--dst', required=True, help='the new OUT_DIR (created; must not already hold any of the trials)')
     ap.add_argument('--subset', required=True, help='pick_dev_subset.py JSON, or its name under --src')
+    ap.add_argument('--all-reps', action='store_true',
+                    help="every rep step_1 laid out for the subset's SUBJECTS (e.g. the full dev split), not just its trials")
     ap.add_argument('--dry-run', action='store_true')
     args = ap.parse_args()
     src, dst = os.path.abspath(args.src), os.path.abspath(args.dst)
     if dst == src or dst.startswith(src + os.sep) or src.startswith(dst + os.sep):
         raise SystemExit('--dst must be a separate folder, not inside (or containing) --src')
     spath, name, trials = read_subset(src, args.subset)
+    if args.all_reps:      # every laid-out rep (a folder with Analysis/keypoints) of the subset's subjects
+        trials = {u: sorted(os.path.basename(os.path.dirname(os.path.dirname(p)))
+                            for p in glob.glob(os.path.join(src, u, '*', 'Analysis', 'keypoints')))
+                  for u in trials}
 
     plan = [(spath, os.path.join(dst, name + '.json'))]
     plan += [(p, os.path.join(dst, os.path.basename(p)))

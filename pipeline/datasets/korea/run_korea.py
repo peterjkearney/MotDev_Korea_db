@@ -27,7 +27,7 @@ apart from the full set's.  The subjects left out are the held-out set: run them
 
     python3 datasets/korea/run_korea.py --gt3d ... --from step_2c --subset dev_subset --configs C8,C13
 
-MotionBERT window length (--clip-len, step_2a; default 81): clone the subset into a fresh OUT_DIR
+MotionBERT window (--clip-len, default 16; --stride, default 1; step_2a): clone the subset into a fresh OUT_DIR
 (datasets/korea/clone_out_dir.py copies step_1's layout and step_2c's shapes, nothing MotionBERT made),
 point BIOCV_OUT at it and run from step_2a, skipping step_2c so the shapes stay the copied ones:
 
@@ -72,8 +72,10 @@ def main():
                     help="step_8 and the tables: score against the all-camera target (default) or each camera's "
                          'leave-one-out one (separate files: error_metrics_tri_loo.npz, results_table_tri_loo.csv)')
     ap.add_argument('--clip-len', type=int, default=None,
-                    help="step_2a's MotionBERT window (default: step_2a's, 81); use a fresh OUT_DIR per length "
+                    help="step_2a's MotionBERT window (default: step_2a's, 16; trees made before 2026-11-13 are 81); use a fresh OUT_DIR per length "
                          '(datasets/korea/clone_out_dir.py)')
+    ap.add_argument('--stride', type=int, default=None,
+                    help="step_2a's frames between window samples (default 1; 3 = 10 fps on 30 fps video)")
     ap.add_argument('--stop-on-fail', action='store_true')
     args = ap.parse_args()
     require_out_dir()
@@ -99,7 +101,8 @@ def main():
         raise SystemExit(f'--until {args.until} comes before --from {args.start}')
     stages = STAGES[i0:i1 + 1]
     print(f'OUT_DIR {OUT_DIR}\nstages  {", ".join(stages)}' +
-          (f'\nclip_len {args.clip_len} (step_2a)' if args.clip_len else '') + f'\ntarget  {args.tri}' +
+          (f'\nclip_len {args.clip_len} (step_2a)' if args.clip_len else '') +
+          (f'\nstride  {args.stride} (step_2a)' if args.stride else '') + f'\ntarget  {args.tri}' +
           (f'\nsubset  {name}: {len(units())} trials of {len(users)} subjects' if subset else
            f'\nusers   {", ".join(users)}' if users else ''))
     ok = True
@@ -110,7 +113,8 @@ def main():
             script = {'step_2a': 'step_2a_extract_betas.py', 'step_2b': 'step_2b_finalise_betas.py',
                       'step_3': 'step_3_extract_3d.py', 'step_4': 'step_4_PnP.py'}[st]
             extra = ['--exclude-joints', 'Hip,RHip,LHip'] if st == 'step_4' else \
-                    ['--clip-len', str(args.clip_len)] if st == 'step_2a' and args.clip_len else []
+                    [*(['--clip-len', str(args.clip_len)] if args.clip_len else []),
+                     *(['--stride', str(args.stride)] if args.stride else [])] if st == 'step_2a' else []
             ok = all([run(script, *sel(u, a), *extra) for u, a in units()])
         elif st == 'step_2c':
             ok = all([run('step_2c_fit_shape.py', *sel(u)) for u in (users or [None])]) \
