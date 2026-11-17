@@ -34,7 +34,6 @@ SMPL_KID_TEMPLATE / MODELS_DIR, as the pipeline already finds it); the GT3D fold
 (.../Korea/{B,C}/GT3D); and analysis/joint_calib/out/fit_v3 (git-ignored: upload it, pass --fits).
 """
 import argparse
-import glob
 import json
 import os
 import sys
@@ -276,13 +275,16 @@ def split_reps(root, splits_path, sets, split_names, fits):
             if not os.path.exists(os.path.join(fits, f'{u}.npz')):
                 no_body.append(u)
                 continue
+            # the session summary lists the usable (and saved) reps: opening every rep file instead to read its
+            # flag costs minutes on a Drive mount (checked: identical lists on all B/C sessions, 2026-11-17)
             summ = os.path.join(root, st, 'GT3D', u, 'session_summary.json')
-            if not (os.path.exists(summ) and json.load(open(summ)).get('usable')):
+            if not os.path.exists(summ):
                 continue
-            for p in sorted(glob.glob(os.path.join(root, st, 'GT3D', u, f'{u}_GMS_*.npz'))):
-                with np.load(p) as z:
-                    if bool(z['usable']):
-                        out.append((st, u, os.path.basename(p)[:-4]))
+            d = json.load(open(summ))
+            if not d.get('usable'):
+                continue
+            out += [(st, u, r['stub']) for r in sorted(d['reps'], key=lambda r: r['stub'])
+                    if r.get('usable') and r.get('saved', True)]
     return out, no_body
 
 
