@@ -59,12 +59,14 @@ KORE_ROOT = '/Volumes/Sandisk_SSD/MotorDevelopment/Korea'
 # what they move, so the split between them is the prior's; never observed: forearm twist (pronation), wrists, hands,
 # toes.  Over a gap the fit's limbs are a guess: hiding a whole arm on dev reps, 1-frame gaps came back within
 # ~2 deg, 3-frame gaps 5-14 deg off (wrist 11-22 mm) -- so only --gap-frames 1 counts as seen.
+# The masks describe each segment's GLOBAL (camera-frame) orientation, not the local rotation the pose stores:
+# a local rotation also carries its parents' prior-set split.  Checked on 6 dev reps (build_dataset.py, 2026-11-17):
+# the fit's spine is near straight (lam_torso; pelvis->thorax bend median -1 deg) where MotionBERT bends it 21 deg
+# with the pelvis tipped back -- hips, shoulders and neck fix the trunk as a whole, not that split.  So the pelvis
+# gives only its hip line (swing = the left-right axis; its tilt about it is unobserved), Spine1-3 and Neck give
+# nothing of their own (the trunk is left to the keypoint positions), and limbs give their global bone direction.
 OBSERVE = {   # SMPL-24 joint: (swing keypoints, twist keypoints or None = twist observed with swing, bend joint)
-    'Pelvis': (['LHip', 'RHip', 'Neck'], None, None),
-    'Spine1': (['LHip', 'RHip', 'LShoulder', 'RShoulder', 'Neck'], None, None),
-    'Spine2': (['LHip', 'RHip', 'LShoulder', 'RShoulder', 'Neck'], None, None),
-    'Spine3': (['LHip', 'RHip', 'LShoulder', 'RShoulder', 'Neck'], None, None),
-    'Neck': (['Neck', 'Nose'], ['REye', 'LEye', 'REar', 'LEar'], None),
+    'Pelvis': (['LHip', 'RHip'], [], None),
     'Head': (['Neck', 'Nose'], ['REye', 'LEye', 'REar', 'LEar'], None),
     **{f'{s}_Hip': ([f'{s[0]}Hip', f'{s[0]}Knee'], [f'{s[0]}Ankle'], f'{s}_Knee') for s in ('L', 'R')},
     **{f'{s}_Knee': ([f'{s[0]}Knee', f'{s[0]}Ankle'], [f'{s[0]}Heel', f'{s[0]}BigToe'], None) for s in ('L', 'R')},
@@ -75,7 +77,7 @@ OBSERVE = {   # SMPL-24 joint: (swing keypoints, twist keypoints or None = twist
 }
 BEND_DEG = 25.0      # knee / elbow flexion below which the hip / shoulder twist is not determined
 OBS_REPORT = {g: [F.S24[j] for j in js] for g, js in (
-    ('root', ['Pelvis']), ('spine', ['Spine1', 'Spine2', 'Spine3']), ('head', ['Neck', 'Head']),
+    ('pelvis', ['Pelvis']), ('head', ['Head']),
     ('hips', ['L_Hip', 'R_Hip']), ('knees', ['L_Knee', 'R_Knee']), ('ankles', ['L_Ankle', 'R_Ankle']),
     ('collars', ['L_Collar', 'R_Collar']), ('shoulders', ['L_Shoulder', 'R_Shoulder']),
     ('elbows', ['L_Elbow', 'R_Elbow']), ('wrists+hands+feet', ['L_Wrist', 'R_Wrist', 'L_Hand', 'R_Hand',
@@ -109,7 +111,7 @@ def observed_mask(X, J24, gap):
         if tw is None:
             full[:, k] = swing[:, k]
         elif tw:
-            twist = have(tw) if j not in ('Neck', 'Head') else p[:, [B[n] for n in tw]].sum(1) >= 2
+            twist = have(tw) if j != 'Head' else p[:, [B[n] for n in tw]].sum(1) >= 2
             if bend:
                 c = F.S24[bend]
                 kid = F.S24[bend.replace('Knee', 'Ankle').replace('Elbow', 'Wrist')]
@@ -119,6 +121,8 @@ def observed_mask(X, J24, gap):
                 twist &= np.degrees(np.arccos(np.clip(cosang, -1, 1))) >= BEND_DEG
             full[:, k] = swing[:, k] & twist
     return swing, full
+
+
 # keypoints the model puts out, by group, for the residual report
 GROUPS = {'limbs': list(F.ANCHOR_JOINTS), 'hips_sh': ['RHip', 'LHip', 'RShoulder', 'LShoulder', 'Neck', 'MidHip'],
           'face': list(F.FACE_VERTICES), 'feet': list(F.OPENPOSE_FOOT_VERTICES)}
