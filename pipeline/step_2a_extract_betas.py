@@ -64,6 +64,8 @@ from utils.missing_joints import fill_missing
 _MB_MESH_CFG  = os.path.join(_MB_DIR, 'configs', 'mesh', 'MB_ft_pw3d.yaml')
 _MB_MESH_CKPT = os.path.join(_MB_DIR, 'checkpoint', 'mesh',
                                'FT_MB_release_MB_ft_pw3d', 'best_epoch.bin')
+# MB_MESH_CKPT=<path> swaps in another checkpoint of the same model (e.g. training/finetune.py's best.bin)
+_MB_MESH_CKPT = os.environ.get('MB_MESH_CKPT') or _MB_MESH_CKPT
 
 _CLIP_LEN = 16      # default window; --clip-len overrides (was 81 before 2026-11-13)
 
@@ -119,6 +121,7 @@ def load_model(device):
                                 dim_rep=mb_args.dim_rep,
                                 hidden_dim=mb_args.hidden_dim,
                                 dropout_ratio=mb_args.dropout)
+    print(f'MotionBERT-Mesh checkpoint: {_MB_MESH_CKPT}', flush=True)
     ckpt = torch.load(_MB_MESH_CKPT, map_location='cpu')
     sd = {k.replace('module.', ''): v for k, v in ckpt['model'].items()}
     mesh_model.load_state_dict(sd, strict=True)

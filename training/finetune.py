@@ -32,8 +32,14 @@ from torch.utils.data import DataLoader
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_ROOT, 'training'))
 sys.path.insert(0, os.path.join(_ROOT, 'pipeline'))
-from config import MB_DIR  # noqa: E402
+from config import MB_DIR, require_motionbert  # noqa: E402
+require_motionbert()      # a clear message (is MB_DIR set?) instead of "No module named 'lib'"
 sys.path.insert(0, MB_DIR)
+try:                      # MotionBERT's loss_mesh.py imports ipdb but never needs it; Colab doesn't ship it
+    import ipdb  # noqa: F401
+except ImportError:
+    import types
+    sys.modules['ipdb'] = types.ModuleType('ipdb')
 from lib.utils.tools import get_config  # noqa: E402
 from lib.utils.learning import load_backbone  # noqa: E402
 from lib.model.model_mesh import MeshRegressor  # noqa: E402
@@ -235,7 +241,8 @@ def main():
             opt.step()
             step += 1
             for k, v in {**L, 'total': loss}.items():
-                run[k] = 0.9 * run.get(k, float(v)) + 0.1 * float(v)
+                v = float(v.detach()) if torch.is_tensor(v) else float(v)
+                run[k] = 0.9 * run.get(k, v) + 0.1 * v
             if i % opts.print_every == 0:
                 print(f'  epoch {epoch} [{i}/{len(tl)}]{" (backbone frozen)" if frozen else ""} '
                       + ' '.join(f'{k} {v:.4g}' for k, v in run.items()), flush=True)
