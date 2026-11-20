@@ -10,6 +10,9 @@ Every term is masked to what the data determines (build_dataset.py, pseudo_gt.OB
     pos   BODY_25 keypoints the fit had data for, relative to the mid-hip: mean distance (mm) -- this is what holds
           the trunk, whose pelvis / spine split the keypoints do not fix
     vel   the same keypoints' frame-to-frame motion (mm/frame), on frame pairs where both are seen
+    tri   the same predicted keypoints against the all-camera TRIANGULATION itself (mm, mid-hip relative, frames whose
+          mid-hip was triangulated): data the pseudo-GT fit could not follow (its near-straight spine, a frame it got
+          wrong) still pulls on the model -- noisier than the fit, so weighted below pos (finetune.py --w-tri)
 
 frame_ok gates every frame.  Weights default to MotionBERT's (lambda_pose 1000, lambda_3d 0.5, lambda_3dv 10).
 """
@@ -59,6 +62,7 @@ def korea_loss(output, gt, body):
     full = gt['obs_full'].reshape(-1, 24) & ok[:, None]
     sw = gt['obs_swing'].reshape(-1, 24) & ok[:, None]
     km = gt['kp_mask'].reshape(-1, 25) & ok[:, None]
+    mid_ok = km[:, MID].clone()
     km[:, MID] = False
     out = {}
     out['rot'] = (G_p - G_t).abs().mean((-1, -2))[full].mean() if full.any() else theta.sum() * 0
@@ -73,7 +77,17 @@ def korea_loss(output, gt, body):
     kmv = kmv[:, 1:] & kmv[:, :-1]
     ev = (v_p - v_t).norm(dim=-1) * 1000.0
     out['vel'] = ev[kmv].mean() if kmv.any() else theta.sum() * 0
+    out['tri'] = tri_err(kp_p, gt, km & mid_ok[:, None], theta)
     return out
+
+
+def tri_err(kp_p, gt, m, theta):
+    """mean distance (mm) of the mid-hip-relative predicted keypoints from the triangulated ones, over m."""
+    if 'tri' not in gt or not m.any():
+        return theta.sum() * 0
+    tri = gt['tri'].reshape(-1, 25, 3)
+    tri = tri - tri[:, MID:MID + 1]
+    return ((kp_p - tri).norm(dim=-1) * 1000.0)[m].mean()
 
 
 def h36m_from_kp(kp):
@@ -105,7 +119,7 @@ def procrustes_err(P, Q, w):
 
 @torch.no_grad()
 def korea_metrics(output, gt, body, eval_mask):
-    """Per-batch sums for the dev report: keypoint error vs the pseudo-GT (mm), H36M error vs camera c's LOO
+    """Per-batch sums for the dev report: keypoint error vs the pseudo-GT and vs the triangulation (mm), H36M error vs camera c's LOO
     target (root-relative and Procrustes, mm), and orientation error of observed segments (deg)."""
     theta = output[0]['theta']
     N, T = theta.shape[:2]
@@ -113,8 +127,11 @@ def korea_metrics(output, gt, body, eval_mask):
     kp_t, G_t, _ = pose_body(body, gt['pose'], gt)
     ok = gt['ok'].reshape(-1)
     km = gt['kp_mask'].reshape(-1, 25) & ok[:, None]
+    mid_ok = km[:, MID].clone()
     km[:, MID] = False
     e = (kp_p - kp_t).norm(dim=-1)[km] * 1000.0
+    mt = km & mid_ok[:, None]
+    et = (kp_p - (gt['tri'].reshape(-1, 25, 3) - gt['tri'].reshape(-1, 25, 3)[:, MID:MID + 1])).norm(dim=-1)[mt] * 1000.0
     # vs LOO: both relative to their own H36M pelvis
     H = h36m_from_kp(kp_p)
     L = gt['loo3d'].reshape(-1, 17, 3)
@@ -131,5 +148,5 @@ def korea_metrics(output, gt, body, eval_mask):
     d_p = (G_p @ ax[..., None])[..., 0]
     d_t = (G_t @ ax[..., None])[..., 0]
     dang = torch.rad2deg(torch.arccos((d_p * d_t).sum(-1).clamp(-1, 1)))[sw]
-    return dict(kp=(e.sum().item(), e.numel()), loo=(el.sum().item(), el.numel()), loo_pa=(pa.sum().item(), pa.numel()),
+    return dict(kp=(e.sum().item(), e.numel()), kp_tri=(et.sum().item(), et.numel()), loo=(el.sum().item(), el.numel()), loo_pa=(pa.sum().item(), pa.numel()),
                 rot_deg=(ang.sum().item(), ang.numel()), dir_deg=(dang.sum().item(), dang.numel()))

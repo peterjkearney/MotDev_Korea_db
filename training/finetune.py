@@ -121,6 +121,9 @@ def main():
     ap.add_argument('--w-dir', type=float, default=1000.0)
     ap.add_argument('--w-pos', type=float, default=0.5)
     ap.add_argument('--w-vel', type=float, default=10.0)
+    ap.add_argument('--w-tri', type=float, default=0.0,
+                    help='keypoints vs the all-camera triangulation itself (korea_loss tri; mm like --w-pos). '
+                         '0 = run1 (pseudo-GT only); run2 used 0.25')
     ap.add_argument('--no-flip', action='store_true')
     ap.add_argument('--bn-train', action='store_true',
                     help="let the head's BatchNorm layers use and update batch statistics (default: frozen at the "
@@ -203,7 +206,7 @@ def main():
         history.append(m)
         with open(os.path.join(opts.out, 'history.json'), 'w') as f:
             json.dump(history, f, indent=1)
-        print(f'== epoch {epoch}: dev keypoints {m["kp"]:.1f} mm | vs LOO {m["loo"]:.1f} mm, PA {m["loo_pa"]:.1f} | '
+        print(f'== epoch {epoch}: dev keypoints {m["kp"]:.1f} mm (vs triangulation {m["kp_tri"]:.1f}) | vs LOO {m["loo"]:.1f} mm, PA {m["loo_pa"]:.1f} | '
               f'orientation {m["rot_deg"]:.1f} deg, bone dir {m["dir_deg"]:.1f} deg'
               + (f' | 3DPW MPJPE {m["pw3d_mpjpe"]:.1f} PA {m["pw3d_pa_mpjpe"]:.1f}' if 'pw3d_mpjpe' in m else ''),
               flush=True)
@@ -229,7 +232,8 @@ def main():
                 break
             gt = to(dev, gt)
             L = korea_loss(model(x.to(dev)), gt, body)
-            loss = opts.w_rot * L['rot'] + opts.w_dir * L['dir'] + opts.w_pos * L['pos'] + opts.w_vel * L['vel']
+            loss = opts.w_rot * L['rot'] + opts.w_dir * L['dir'] + opts.w_pos * L['pos'] + opts.w_vel * L['vel'] \
+                + opts.w_tri * L['tri']
             opt.zero_grad()
             loss.backward()
             if mix_names and step % opts.mix_every == 0:

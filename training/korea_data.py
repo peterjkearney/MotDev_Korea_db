@@ -3,7 +3,8 @@
 Each item is one clip of --clip-len frames cut from a (rep, camera) sequence every --stride frames (the last clip
 ends on the last frame).  Input: the step_2a-prepared 2D (clip_len, 17, 3).  Target dict: the pose (axis-angle,
 root in this camera), the child's shape and keypoint offsets, and the masks the loss uses -- frame_ok, obs_swing /
-obs_full (global segment orientation observed) and kp_mask (BODY_25 keypoints the pseudo-GT fit had data for).
+obs_full (global segment orientation observed) and kp_mask (BODY_25 keypoints the pseudo-GT fit had data for), and
+those keypoints' all-camera triangulation itself (tri, camera frame, metres; zeros where kp_mask is False).
 
 Sequences whose fit projects badly into their camera (> --max-proj-px, a slightly wrong camera) are left out, and so
 are clips with too few usable frames.  flip=True mirrors half the clips as MotionBERT's own training does: the 2D
@@ -50,7 +51,8 @@ class KoreaClips(Dataset):
         self.pose = d['pose']
         self.obs_swing, self.obs_full = d['obs_swing'], d['obs_full']
         self.ok = d['frame_ok']
-        self.kp_mask = np.isfinite(d['x3d_body25']).all(-1)
+        self.tri = d['x3d_body25']                                                   # all-camera triangulation
+        self.kp_mask = np.isfinite(self.tri).all(-1)
         self.loo3d, self.loo_ok = d['loo3d'], d['loo_ok']
         self.seq_start, self.seq_len = d['seq_start'], d['seq_len']
         self.seq_rep, self.seq_cam, self.seq_subject = d['seq_rep'], d['seq_cam'], d['seq_subject']
@@ -82,15 +84,18 @@ class KoreaClips(Dataset):
         x = self.x2d[idx]
         pose = self.pose[idx]
         sw, fu, km = self.obs_swing[idx], self.obs_full[idx], self.kp_mask[idx]
+        tri = np.nan_to_num(self.tri[idx])
         off = self.offsets[s].copy()
         if self.flip and random.random() < 0.5:
             x, pose = flip_2d(x), flip_pose(pose)
             sw, fu, km = sw[:, P24], fu[:, P24], km[:, P25]
+            tri = tri[:, P25] * np.array([-1.0, 1.0, 1.0], np.float32)     # mirrored in the camera's x, as the pose
             for g in ('neck', 'midhip'):                   # central offsets: their sideways part mirrors
                 off[OFFSET_GROUPS.index(g), 0] *= -1
         gt = dict(pose=torch.from_numpy(pose.astype(np.float32)), shape=torch.from_numpy(self.shape[s]),
                   offsets=torch.from_numpy(off), ok=torch.from_numpy(self.ok[idx]),
                   obs_swing=torch.from_numpy(sw), obs_full=torch.from_numpy(fu), kp_mask=torch.from_numpy(km),
+                  tri=torch.from_numpy(tri.astype(np.float32)),
                   loo3d=torch.from_numpy(np.nan_to_num(self.loo3d[idx])), loo_ok=torch.from_numpy(self.loo_ok[idx]),
                   seq=torch.tensor(int(s)))
         return torch.from_numpy(x.astype(np.float32)), gt
