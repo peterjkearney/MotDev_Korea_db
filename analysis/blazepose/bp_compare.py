@@ -47,9 +47,9 @@ REPO = os.path.dirname(os.path.dirname(_HERE))
 sys.path.insert(0, os.path.join(REPO, 'pipeline'))
 sys.path.insert(0, os.path.join(REPO, 'pipeline', 'datasets', 'biocv'))
 from config import OUT_DIR, calib_path, mocap_path, pnp_path, shapes_path, stature_path, twod_path  # noqa: E402
-from utils.calibration import load_calib  # noqa: E402
+from utils.calibration import load_calib, reproject  # noqa: E402
 from bp_views import trial_mocap, view_angle, view_bin  # noqa: E402
-from bp_extract import mp_path  # noqa: E402
+from bp_extract import MP_TO_COCO, coco_to_h36m, mp_path  # noqa: E402
 
 SYSTEMS = ('ours', 'blazepose')
 P03_USER = 'User03'
@@ -58,6 +58,7 @@ LIMBS = {'R thigh': (1, 2), 'R shank': (2, 3), 'L thigh': (4, 5), 'L shank': (5,
          'L upper arm': (11, 12), 'L forearm': (12, 13), 'R upper arm': (14, 15), 'R forearm': (15, 16)}
 UP = np.array([0.0, 0.0, 1.0])
 ANGLES = ('knee_flex', 'hip_flex', 'hip_abd', 'elbow_flex', 'shoulder_elev', 'trunk_lean')
+WRONG_REL = 0.35       # BlazePose 2D this far (median joint, fraction of the subject's 2D height) from mocap = someone else
 POS_METRICS = ('pa_limb', 'pa_all', 'pa_off', 'root_limb', 'root_all', 'root_off',
                'rootS_limb', 'rootS_all', 'rootS_off')
 
@@ -156,20 +157,41 @@ def tilt(Pc):
 
 
 # ---------------------------------------------------------------- loading
-def load_view(u, a, cam, config):
+def bp_2d_rel(image33, G, mask, calib):
+    """(T,) median distance of BlazePose's 2D joints from the projected mocap, as a fraction of the subject's projected
+    height (NaN where either is missing): ~0.05-0.15 for a sloppy pose of the right person, >> WRONG_REL for another."""
+    W, H, K, L, dist = calib
+    cam = G @ L[:3, :3].T + L[:3, 3]
+    T = len(G)
+    uv = reproject(cam.reshape(-1, 3), K, dist.reshape(1, 5)).reshape(T, 17, 2)
+    uv[cam[..., 2] <= 0] = np.nan
+    bp = coco_to_h36m(image33[:, MP_TO_COCO, :2].astype(float)) * np.array([W, H])
+    j = np.where(mask)[0]
+    d = np.nanmedian(np.linalg.norm(bp[:, j] - uv[:, j], axis=-1), axis=1)
+    h = np.nanmax(uv[:, j, 1], axis=1) - np.nanmin(uv[:, j, 1], axis=1)
+    return d / h
+
+
+def load_view(u, a, cam, config, bp_suffix=''):
     d = np.load(twod_path(u, a, 'openpose', cam))
     sfi = d['source_frame_idx'].astype(int)
     G = trial_mocap(u, a, sfi)
     mask = np.asarray(np.load(mocap_path(u, a))['valid_joint_mask'], bool)
-    L = load_calib(calib_path(u, cam, a))[3]
+    calib = load_calib(calib_path(u, cam, a))
+    L = calib[3]
     R, t = L[:3, :3], L[:3, 3]
     ours_c = np.load(pnp_path(u, a, 'openpose', cam, config))['kps_H36M_placed'].astype(float) * 1000.0
-    bp_c = np.load(mp_path(u, a, cam))['world'].astype(float)
+    bp = np.load(mp_path(u, a, cam).replace('_mp.npz', f'_mp{bp_suffix}.npz'))
+    bp_c = bp['world'].astype(float)
     T = min(len(sfi), len(ours_c), len(bp_c))
     if not len(sfi) == len(ours_c) == len(bp_c):
         print(f'  WARNING {u}/{a} cam {cam}: rows 2d {len(sfi)} ours {len(ours_c)} blazepose {len(bp_c)} -> {T}')
     sfi, G, ours_c, bp_c = sfi[:T], G[:T], ours_c[:T], bp_c[:T]
-    return dict(sfi=sfi, G=G, Gc=G @ R.T + t, mask=mask, L=L,
+    import warnings
+    with warnings.catch_warnings(), np.errstate(all='ignore'):
+        warnings.simplefilter('ignore', RuntimeWarning)              # all-NaN rows: frames with no detection
+        rel = bp_2d_rel(bp['image33'][:T], G, mask, calib)
+    return dict(sfi=sfi, G=G, Gc=G @ R.T + t, mask=mask, L=L, bp_rel=rel,
                 sys={'ours': ((ours_c - t) @ R, ours_c), 'blazepose': (bp_c @ R, bp_c)})
 
 
@@ -204,6 +226,19 @@ def summarise(F, Tr, title):
     out = [f'==== {title}: {F.subject.nunique()} subjects, {F.groupby(["action", "cam"]).ngroups} trial-cameras, '
            f'{len(F) // 2} paired frames', '']
     cols = 'ours  blazepose'
+    b = F[F.system == 'blazepose']
+    out += ['-- BlazePose identity: % of mocap frames with no detection | % of paired frames on someone else '
+            f'(2D median joint > {WRONG_REL:.2f} x subject height from projected mocap); worst trial-cameras']
+    wr = b.groupby(['action', 'cam']).wrong_person.mean().sort_values(ascending=False)
+    nd = 1 - Tr[Tr.system == 'blazepose'].det_rate
+    out.append(f'   no detection {100 * nd.mean():.1f}%   wrong person {100 * b.wrong_person.mean():.2f}%   ' +
+               '  '.join(f'{a} {c} {100 * x:.0f}%' for (a, c), x in wr.head(5).items() if x > 0))
+    ok_f = F.set_index(['action', 'cam', 'frame']).index.isin(
+        b[~b.wrong_person].set_index(['action', 'cam', 'frame']).index)
+    Fr = F[ok_f]
+    out.append(f'   without wrong-person frames ({cols}): ' + '   '.join(
+        f'{m} ' + paired(Fr.groupby(['subject', 'system'])[m].median().unstack()) for m in ('pa_limb', 'root_limb')))
+    out.append('')
     out += ['-- position error (mm), pooled frames: mean / median / p5 / p95 / % > 100 mm',
             f'{"metric":>11} {"system":>10} {"mean":>7} {"med":>7} {"p5":>7} {"p95":>7} {">100":>6}']
     for m in POS_METRICS + ('placed_all',):
@@ -264,8 +299,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--config', default='C19')
     ap.add_argument('--shapes-only', action='store_true')
-    ap.add_argument('--out', default=os.path.join(OUT_DIR, 'bp_compare'))
+    ap.add_argument('--bp-suffix', default='', help="BlazePose cache: '' as is, '_crop' subject given (bp_extract --crop)")
+    ap.add_argument('--out', default=None, help='default {BIOCV_OUT}/bp_compare{bp_suffix}')
     args = ap.parse_args()
+    args.out = args.out or os.path.join(OUT_DIR, f'bp_compare{args.bp_suffix}')
     if args.shapes_only:
         shapes_report()
         return
@@ -278,12 +315,13 @@ def main():
                 if role not in r:
                     continue
                 cam = r[role]
-                need = [pnp_path(u, a, 'openpose', cam, args.config), mp_path(u, a, cam)]
+                need = [pnp_path(u, a, 'openpose', cam, args.config),
+                        mp_path(u, a, cam).replace('_mp.npz', f'_mp{args.bp_suffix}.npz')]
                 if not all(os.path.exists(p) for p in need):
                     print(f'{u}/{a} cam {cam}: missing ' + ', '.join(os.path.relpath(p, OUT_DIR) for p in need
                                                                      if not os.path.exists(p)))
                     continue
-                v = load_view(u, a, cam, args.config)
+                v = load_view(u, a, cam, args.config, args.bp_suffix)
                 v.update(user=u, action=a, cam=cam, role=role)
                 views.append(v)
     if not views:
@@ -351,8 +389,9 @@ def main():
                 tr[f'{an}_peak_err'] = float(np.mean([abs(np.nanmax(p_ang[k]) - np.nanmax(g_ang[k])) for k in keys]))
                 rom = lambda x: np.nanmax(x) - np.nanmin(x)                 # noqa: E731
                 tr[f'{an}_rom_err'] = float(np.mean([abs(rom(p_ang[k]) - rom(g_ang[k])) for k in keys]))
+            rel = v['bp_rel'][ok] if s == 'blazepose' else np.full(len(idx), np.nan)
             frames.append(pd.DataFrame(dict(base, system=s, frame=idx, source_frame=v['sfi'][ok], view_angle=ang,
-                                            view=view_bin(ang), **rec)))
+                                            view=view_bin(ang), bp_2d_rel=rel, wrong_person=rel > WRONG_REL, **rec)))
             trials.append(tr)
         trials.append(dict(base, system='mocap', n_paired=int(ok.sum()), **limb_tails(G), jitter=jitter(G[:, all_j], idx),
                            det_rate=np.nan, tilt_signed=0.0, tilt_abs=0.0))
@@ -363,7 +402,8 @@ def main():
     F.to_csv(os.path.join(args.out, 'frames.csv.gz'), index=False, float_format='%.2f')
     Tr.to_csv(os.path.join(args.out, 'trials.csv'), index=False, float_format='%.4f')
     lines = [f'ours = OpenPose 2D 30 fps -> fine-tuned MotionBERT-Mesh -> {args.config}; '
-             f'BlazePose = heavy, video mode; single camera each; vs mocap', '']
+             f'BlazePose = heavy, video mode, ' + ('cropped to our OpenPose subject (subject given)' if args.bp_suffix == '_crop'
+             else 'whole frame (as is)') + '; single camera each; vs mocap', '']
     for title, users in (('TEST (10 adults)', test_users), ('P03 (pipeline tuned on it)', [P03_USER])):
         f, t = F[F.subject.isin(users)], Tr[Tr.subject.isin(users)]
         if len(f):

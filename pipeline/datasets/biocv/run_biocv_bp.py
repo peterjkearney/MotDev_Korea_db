@@ -19,8 +19,8 @@ Stages (each step skips what is done, so re-running resumes):
     step_2c   shapes per subject
     step_4b   C19 on the 3 chosen cameras
     step_8    our own mocap scoring of C19 (cross-check for bp_compare)
-    blazepose analysis/blazepose/bp_extract.py on the same frames (needs mediapipe==0.10.21)
-    compare   analysis/blazepose/bp_compare.py
+    blazepose analysis/blazepose/bp_extract.py on the same frames, whole frame AND cropped to our subject (Tasks API; pip install mediapipe==0.10.35 on Colab)
+    compare   analysis/blazepose/bp_compare.py for both -> bp_compare/ (as is) and bp_compare_crop/ (subject given)
 
 Colab:
     %env BIOCV_ROOT=/content/drive/MyDrive/MotorDevelopment/Data/BioCV
@@ -187,9 +187,12 @@ def main():
             ok = all([run('pipeline/step_2c_fit_shape.py', '--user', u) for u in sorted({u for u, _ in trials})])
             ok = run('analysis/blazepose/bp_compare.py', '--shapes-only') and ok
         elif st == 'blazepose':
-            ok = run('analysis/blazepose/bp_extract.py', '--trials', ','.join(f'{u}/{a}' for u, a in trials))
+            tl = ','.join(f'{u}/{a}' for u, a in trials)
+            ok = run('analysis/blazepose/bp_extract.py', '--trials', tl)                  # as is
+            ok = run('analysis/blazepose/bp_extract.py', '--trials', tl, '--crop') and ok   # subject given
         elif st == 'compare':
             ok = run('analysis/blazepose/bp_compare.py', '--config', CONFIG)
+            ok = run('analysis/blazepose/bp_compare.py', '--config', CONFIG, '--bp-suffix', '_crop') and ok
         if not ok and args.stop_on_fail:
             print(f'stopping at {st}')
             break
