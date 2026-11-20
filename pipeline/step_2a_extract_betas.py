@@ -57,7 +57,8 @@ for _d in (_MB_DIR, _SCRIPT_DIR):
 
 from lib.utils.tools import get_config
 from lib.utils.learning import load_backbone
-from lib.utils.utils_data import crop_scale
+from lib.utils.utils_data import crop_scale, flip_data
+from lib.utils.utils_mesh import flip_thetas
 from lib.model.model_mesh import MeshRegressor
 from utils.missing_joints import fill_missing
 
@@ -87,8 +88,22 @@ def run_backbone(model, batch, clip_len, device):
             feat = model.backbone.get_representation(batch)
     else:
         feat = model.backbone.get_representation(batch)
-    feat = feat.reshape(1, clip_len, model.feat_J, -1)
+    feat = feat.reshape(batch.shape[0], clip_len, model.feat_J, -1)
     return feat[:, clip_len // 2 : clip_len // 2 + 1, :, :]
+
+
+def stored_flip(path):
+    """--flip the betas file was made with (files from before the option: False)."""
+    with np.load(path) as z:
+        return bool(z['flip']) if 'flip' in z.files else False
+
+
+def mean_rotation(R):
+    """(K,24,3,3) -> (24,3,3): the chordal mean -- the average matrix projected back onto the rotations (SVD)."""
+    U, _, Vt = np.linalg.svd(R.mean(0))
+    D = np.ones((R.shape[1], 3))
+    D[:, 2] = np.sign(np.linalg.det(U @ Vt))
+    return (U * D[:, None, :]) @ Vt
 
 
 def _reflect_index(i, n_frames):
@@ -142,7 +157,8 @@ def extract(user, action, camera, mesh_model, device, args):
 
     motion_norm = crop_scale(h36m_2d.astype(np.float32), scale_range=[1, 1])
     clip_len = args.clip_len
-    batch = torch.zeros(1, clip_len, 17, 3, dtype=torch.float32, device=device)
+    n_views = 2 if args.flip else 1      # --flip: the window and its mirror image in one batch
+    batch = torch.zeros(n_views, clip_len, 17, 3, dtype=torch.float32, device=device)
     half = clip_len // 2       # even lengths: half frames before, half-1 after (16 -> 8 back, 7 forward)
     stride = args.stride       # frames between window samples; the centre sample is always frame_n
 
@@ -154,21 +170,32 @@ def extract(user, action, camera, mesh_model, device, args):
         win_np = motion_norm[indices] # pulling batch of numpy 2D keypoints for frames in window
 
         with torch.no_grad():
-            batch.copy_(torch.from_numpy(win_np[None]))
+            win_t = torch.from_numpy(win_np[None])
+            if args.flip:
+                win_t = torch.cat([win_t, flip_data(win_t)])
+            batch.copy_(win_t)
             feat_center = run_backbone(mesh_model, batch, clip_len, device) # Runs the DSTformer backbone over the full window
                         # (at 81, every frame's representation is informed by 40 frames of context on each side), then slices out just the
                         # single feature vector for the center frame (clip_len//2, i.e. frame_n itself).
             smpl_out = mesh_model.head(feat_center.float()) # Feeds that one frame's feature vector through the SMPL regression head, producing a dict with the mesh model's outputs for this single frame: 3D keypoints and SMPL pose parameters.
 
-        pose_aa = smpl_out[0]['theta'][0, :72].cpu().numpy().reshape(24, 3) # pose in axis-angle format
-        all_rotmats[frame_n] = _Rot.from_rotvec(pose_aa).as_matrix().astype(np.float32)
-        all_betas[frame_n] = smpl_out[0]['theta'][0, 72:].cpu().numpy()
+        theta = smpl_out[0]['theta'].reshape(n_views, -1).float().cpu().numpy()
+        pose_aa = theta[:, :72].reshape(n_views, 24, 3)  # pose in axis-angle format
+        if args.flip:
+            # MotionBERT's own test-time flip (train_mesh.py evaluate): the mirror image's pose mirrored back
+            # (flip_thetas), then the two averaged -- as rotations here, not as axis-angle numbers
+            pose_aa[1] = flip_thetas(pose_aa[1:2])[0]
+            R = _Rot.from_rotvec(pose_aa.reshape(-1, 3)).as_matrix().reshape(n_views, 24, 3, 3)
+            all_rotmats[frame_n] = mean_rotation(R).astype(np.float32)
+        else:
+            all_rotmats[frame_n] = _Rot.from_rotvec(pose_aa[0]).as_matrix().astype(np.float32)
+        all_betas[frame_n] = theta[:, 72:].mean(0)
 
     out_path = _betas_path(user, action, args.detector, camera)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     np.savez(out_path, rotmats=all_rotmats, betas=all_betas, avg_betas=np.mean(all_betas, axis=0),
              detector=np.array(args.detector), missing=np.array(args.missing), n_missing_joints=n_missing,
-             clip_len=clip_len, stride=stride)
+             clip_len=clip_len, stride=stride, flip=bool(args.flip))
     return (f'{n_frames} frames' +(f', {n_missing} missing joints ({100 * n_missing / (n_frames * 17):.1f}%) '
                                     f'{"filled" if args.missing == "fill" else "left at zero"}' if n_missing else ''))
 
@@ -189,6 +216,9 @@ def main():
                          'the mesh checkpoint was fine-tuned on 16, the backbone pretrained on 243)')
     ap.add_argument('--stride', type=int, default=1,
                     help='frames between window samples (default 1); 3 on 30 fps video = 10 fps, H36M\'s rate')
+    ap.add_argument('--flip', action='store_true',
+                    help="average each window with its mirror image, as MotionBERT's own mesh evaluation does "
+                         "(train_mesh.py, flip: True); twice the MotionBERT time")
     ap.add_argument('--force', action='store_true', help='redo cameras whose output already exists')
     ap.add_argument('--dry-run', action='store_true', help='list what would be run, load nothing')
     args = ap.parse_args()
@@ -204,16 +234,18 @@ def main():
                          f'action={args.action or "*"} -- run step_1_extract_2d.py / step_1_openpose_2d.py first')
     done = [j for j in jobs if os.path.exists(_betas_path(j[0], j[1], args.detector, j[2]))]
     if not args.force:
-        want = (args.clip_len, args.stride)
+        want = (args.clip_len, args.stride, bool(args.flip))
         other = [(j, n) for j in done if (n := (stored_clip_len(p := _betas_path(j[0], j[1], args.detector, j[2])),
-                                                stored_stride(p))) != want]
+                                                stored_stride(p), stored_flip(p))) != want]
         if other:
-            raise SystemExit(f'{len(other)} camera(s) already done with a different --clip-len/--stride, e.g. '
-                             f'{"/".join(other[0][0])} at clip_len {other[0][1][0]} stride {other[0][1][1]} -- use a fresh OUT_DIR '
+            raise SystemExit(f'{len(other)} camera(s) already done with a different --clip-len/--stride/--flip, e.g. '
+                             f'{"/".join(other[0][0])} at clip_len {other[0][1][0]} stride {other[0][1][1]} '
+                             f'flip {other[0][1][2]} -- use a fresh OUT_DIR '
                              f'(datasets/korea/clone_out_dir.py) or --force')
     todo = jobs if args.force else [j for j in jobs if j not in done]
     print(f'{args.detector}: {len(jobs)} camera(s) with 2D under {_OUT_DIR}: {len(todo)} to run, '
-          f'{len(jobs) - len(todo)} already done; clip_len {args.clip_len}, stride {args.stride}')
+          f'{len(jobs) - len(todo)} already done; clip_len {args.clip_len}, stride {args.stride}'
+          + (', flip-averaged' if args.flip else ''))
     if args.dry_run:
         for user, action in sorted({(u, a) for u, a, _ in todo}):
             print(f'  {user}/{action}: {",".join(c for u, a, c in todo if (u, a) == (user, action))}')

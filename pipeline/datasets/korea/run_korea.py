@@ -76,6 +76,7 @@ def main():
                          '(datasets/korea/clone_out_dir.py)')
     ap.add_argument('--stride', type=int, default=None,
                     help="step_2a's frames between window samples (default 1; 3 = 10 fps on 30 fps video)")
+    ap.add_argument('--flip', action='store_true', help="step_2a: average each window with its mirror image")
     ap.add_argument('--stop-on-fail', action='store_true')
     args = ap.parse_args()
     require_out_dir()
@@ -114,7 +115,8 @@ def main():
                       'step_3': 'step_3_extract_3d.py', 'step_4': 'step_4_PnP.py'}[st]
             extra = ['--exclude-joints', 'Hip,RHip,LHip'] if st == 'step_4' else \
                     [*(['--clip-len', str(args.clip_len)] if args.clip_len else []),
-                     *(['--stride', str(args.stride)] if args.stride else [])] if st == 'step_2a' else []
+                     *(['--stride', str(args.stride)] if args.stride else []),
+                     *(['--flip'] if args.flip else [])] if st == 'step_2a' else []
             ok = all([run(script, *sel(u, a), *extra) for u, a in units()])
         elif st == 'step_2c':
             ok = all([run('step_2c_fit_shape.py', *sel(u)) for u in (users or [None])]) \
