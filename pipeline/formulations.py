@@ -133,6 +133,9 @@ CHAIN = {
     # hips and shoulders where OpenPose puts them, as a vertex regressor calibrated against SMPL itself on BioCV
     # adults + Korea B/C children (analysis/joint_calib), moving with the kid weight
     'C19': dict(_C14, shape='kid_oprg', joints='opr', note='C14 with OpenPose vertex-regressor hips/shoulders'),
+    'C19a': dict(_C14, shape='adult_oprg', joints='opr',
+                 note='C19 with the adult-only shape (no kid direction): adults, where the unpenalised kid weight '
+                      'stands in for beta-0 size on shorter subjects (BioCV women 0.11-0.17)'),
     'C20': dict(_C14, shape='kid_oprgw', joints='opr', note='C19 with the hip and shoulder widths in the shape fit'),
     # the head into the 2D term: Nose and Head as the mesh's nose and ear vertices -- the points OpenPose detects --
     # so the 2D can correct MotionBERT's head orientation (before, nothing did: Nose/Head were out of every term)

@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Korea Rep Review</title>
+<style>
+:root {
+  --bg: #111418; --panel: #191d23; --panel2: #20252c; --line: #2c333c; --text: #e4e7eb; --dim: #8b949e;
+  --accent: #4ea1ff; --bad: #ff6b6b; --warn: #f0b429; --ok: #3fb950; --tag: #2b3540;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+  font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+#app { display: grid; grid-template-columns: 300px 1fr; height: 100vh; }
+#side { border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
+#filters { padding: 10px; display: grid; gap: 6px; border-bottom: 1px solid var(--line); }
+#filters select, #filters input { width: 100%; background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+  border-radius: 5px; padding: 5px 6px; font: inherit; }
+#count { color: var(--dim); font-size: 12px; }
+#list { overflow-y: auto; flex: 1; }
+.item { padding: 6px 10px; border-bottom: 1px solid #22272e; cursor: pointer; }
+.item:hover { background: #1f242b; }
+.item.cur { background: #1d3550; }
+.item .s { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.item .g { color: var(--dim); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.item .v { color: var(--ok); font-size: 11px; }
+#main { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow-y: auto; }
+#head { padding: 10px 14px 6px; display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; }
+#head h1 { font-size: 18px; margin: 0; font-family: ui-monospace, Menlo, monospace; }
+.pill { background: var(--tag); border-radius: 10px; padding: 1px 8px; font-size: 12px; color: var(--text); }
+.pill.bad { background: #5a2226; } .pill.ok { background: #1f4a2b; } .pill.warn { background: #4d3d12; }
+#vids { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 0 14px; }
+.cam { position: relative; background: #000; border: 2px solid transparent; border-radius: 6px; overflow: hidden; }
+.cam.bad { border-color: var(--bad); } .cam.moved { border-color: var(--warn); }
+.cam video { width: 100%; display: block; aspect-ratio: 16/9; background: #000; }
+.cam .cap { position: absolute; left: 0; right: 0; top: 0; display: flex; justify-content: space-between; padding: 4px 8px;
+  background: linear-gradient(#000c, #0000); font-size: 12px; pointer-events: none; }
+.cam.out video { opacity: .2; }
+.cam .flag { color: var(--bad); font-weight: 600; } .cam.moved .flag { color: var(--warn); }
+#ctrl { display: flex; align-items: center; gap: 8px; padding: 8px 14px; flex-wrap: wrap; }
+#ctrl button, .tagbtn { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 5px;
+  padding: 4px 10px; font: inherit; cursor: pointer; }
+#ctrl button:hover, .tagbtn:hover { border-color: var(--accent); }
+#scrub { flex: 1; min-width: 200px; accent-color: var(--accent); }
+#fr { font-family: ui-monospace, Menlo, monospace; color: var(--dim); min-width: 110px; }
+#ctrl select { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 5px; padding: 3px; font: inherit; }
+#lower { display: grid; grid-template-columns: 1.3fr 1fr; gap: 14px; padding: 4px 14px 14px; }
+.box { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+.box h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--dim); margin: 0 0 6px; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; margin: 0; }
+dt { color: var(--dim); } dd { margin: 0; word-break: break-word; }
+.reason { color: #ffb3b3; }
+#tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.tagbtn.on { background: #1d3550; border-color: var(--accent); }
+.tagbtn kbd { color: var(--dim); font-size: 11px; margin-right: 4px; font-family: ui-monospace, Menlo, monospace; }
+textarea { width: 100%; min-height: 90px; background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+  border-radius: 6px; padding: 8px; font: inherit; resize: vertical; }
+#saved { font-size: 12px; color: var(--dim); margin-top: 4px; }
+#keys { color: var(--dim); font-size: 12px; margin-top: 10px; line-height: 1.7; }
+kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; font-size: 11px; }
+.cam canvas.ov { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+#skelrow { display: grid; grid-template-columns: 1.3fr 1fr; gap: 14px; padding: 4px 14px 4px; }
+#sideCv { width: 100%; height: 280px; display: block; background: #0b0d10; border-radius: 6px; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--dim); font-size: 12px; margin-top: 6px; }
+.legend i { display: inline-block; width: 18px; height: 4px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
+.bt { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.bt th, .bt td { padding: 2px 6px; text-align: right; border-bottom: 1px solid #262c34; }
+.bt th:first-child, .bt td:first-child { text-align: left; }
+.bt th { color: var(--dim); font-weight: 500; }
+.bt tr.short td { color: var(--dim); }
+.c-ok { color: var(--ok); } .c-warn { color: var(--warn); } .c-bad { color: var(--bad); }
+.sub { color: var(--dim); font-size: 12px; margin: 4px 0 8px; }
+@media (max-width: 1000px) { #app { grid-template-columns: 1fr; } #side { max-height: 35vh; } #lower, #skelrow { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="side">
+    <div id="filters">
+      <select id="fSet"></select>
+      <select id="fGroup"></select>
+      <select id="fState">
+        <option value="all">all reps</option>
+        <option value="todo">not yet reviewed</option>
+        <option value="done">reviewed</option>
+      </select>
+      <select id="fLabel"></select>
+      <input id="fText" placeholder="search stub, reasons, notes…">
+      <div id="count"></div>
+    </div>
+    <div id="list"></div>
+  </aside>
+  <main id="main">
+    <div id="head"><h1 id="stub">—</h1><span id="pills"></span></div>
+    <div id="vids"></div>
+    <div id="ctrl">
+      <button id="bPrev" title="previous rep (↑ / K)">⇧ rep</button>
+      <button id="bBack" title="back 1 frame (←, shift: 10)">◀︎</button>
+      <button id="bPlay" title="play / pause (space)" style="min-width:70px">▶︎ play</button>
+      <button id="bFwd" title="forward 1 frame (→, shift: 10)">▶︎▏</button>
+      <button id="bNext" title="next rep (↓ / J)">⇩ rep</button>
+      <input id="scrub" type="range" min="0" max="1" step="1" value="0">
+      <span id="fr"></span>
+      <label title="[ and ] change speed">speed
+        <select id="speed"><option>0.125</option><option>0.25</option><option selected>0.5</option><option>1</option><option>2</option></select>×
+      </label>
+      <label title="S"><input type="checkbox" id="syncOn" checked> sync offsets <span id="lagtxt" style="color:var(--dim)"></span></label>
+      <label title="O"><input type="checkbox" id="ovOn" checked> skeleton overlay</label>
+    </div>
+    <div id="skelrow">
+      <div class="box">
+        <h2>Triangulated skeleton · side view</h2>
+        <canvas id="sideCv"></canvas>
+        <div class="legend">
+          <span><i style="background:var(--ok)"></i>within 12% of setup median</span>
+          <span><i style="background:var(--warn)"></i>12–25% (rep-gate size)</span>
+          <span><i style="background:var(--bad)"></i>&gt;25% (joint gate drops both ends)</span>
+          <span>side view: floor level, looking across camera 1's line of sight — depth errors show as limbs leaning toward / away from camera 1</span>
+        </div>
+      </div>
+      <div class="box"><h2>Bone lengths</h2><div id="bonePanel"></div></div>
+    </div>
+    <div id="lower">
+      <div class="box"><h2>Why this rep is where it is</h2><dl id="info"></dl></div>
+      <div class="box">
+        <h2>Your verdict</h2>
+        <div id="tags"></div>
+        <textarea id="notes" placeholder="notes (N to focus, Esc to leave, ⌘/Ctrl+Enter = save and next rep)"></textarea>
+        <div id="saved"></div>
+        <div id="keys"><kbd>space</kbd> play · <kbd>←</kbd><kbd>→</kbd> frame (<kbd>shift</kbd> ×10) · <kbd>↑</kbd><kbd>↓</kbd>/<kbd>K</kbd><kbd>J</kbd> rep ·
+          <kbd>1</kbd>–<kbd>8</kbd> toggle tag · <kbd>0</kbd> clear · <kbd>S</kbd> sync · <kbd>O</kbd> overlay · <kbd>[</kbd><kbd>]</kbd> speed · <kbd>N</kbd> notes</div>
+      </div>
+    </div>
+  </main>
+</div>
+<script>
+const TAGS = ['looks fine (gate too strict)', 'wrong person / 2 people', 'left-right swap', 'camera moved / reframed',
+              'child out of frame / occluded', 'sync looks off', 'poor detection (jitter / missing limbs)', 'other (see notes)'];
+const CAMS = ['cam 1 · front', 'cam 2 · right 45°', 'cam 3 · left 45°'];
+// One video frame per data frame (30 fps capture), but the renders are variable frame rate (frames 1/30 or
+// 1/20 s apart), so each frame's time comes from the server (/api/pts) rather than a fixed rate.
+const DFPS = 30;
+let pts = [[], [], []], vrate = [25, 25, 25], token = 0;
+function frameTime(c, t) { const p = pts[c]; return t + 1 < p.length ? 0.5 * (p[t] + p[t + 1]) : p[t] + 0.005; }
+function frameAt(c, time) {           // last frame whose time is <= time
+  const p = pts[c]; let lo = 0, hi = p.length - 1;
+  if (!p.length || time < p[0] - 1e-4) return -1;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (p[m] <= time + 1e-4) lo = m; else hi = m - 1; }
+  return lo;
+}
+const $ = id => document.getElementById(id);
+const store = { get(k, d) { try { const v = localStorage.getItem('repview.' + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+                set(k, v) { try { localStorage.setItem('repview.' + k, JSON.stringify(v)); } catch (e) {} } };
+
+let rows = [], view = [], cur = -1;
+let f = 0, fmin = 0, fmax = 0, playing = false, last = 0;
+let n = [0, 0, 0], lag = [0, 0, 0];
+let saveTimer = null, dirty = false;
+const vids = [], boxes = [], caps = [], ovs = [];
+let skel = null, sstats = null, sideBox = null, pendingFrame = null;
+
+// ---------- build video panes ----------
+for (let c = 0; c < 3; c++) {
+  const box = document.createElement('div'); box.className = 'cam';
+  const v = document.createElement('video'); v.muted = true; v.playsInline = true; v.preload = 'auto';
+  const ov = document.createElement('canvas'); ov.className = 'ov';
+  const cap = document.createElement('div'); cap.className = 'cap';
+  box.append(v, ov, cap); $('vids').append(box);
+  vids.push(v); boxes.push(box); caps.push(cap); ovs.push(ov);
+  v.addEventListener('loadedmetadata', () => draw(true));
+  // a step that landed while an earlier seek was still running: catch up once it finishes
+  v.addEventListener('seeked', () => { if (!playing) draw(false); });
+}
+TAGS.forEach((t, i) => {
+  const b = document.createElement('button'); b.className = 'tagbtn'; b.dataset.tag = t;
+  b.innerHTML = `<kbd>${i + 1}</kbd>${t}`; b.onclick = () => toggleTag(t); $('tags').append(b);
+});
+
+// ---------- data ----------
+fetch('/api/rows').then(r => r.json()).then(d => {
+  rows = d;
+  const sets = [...new Set(rows.map(r => r.set))];
+  $('fSet').innerHTML = '<option value="">all sets</option>' + sets.map(s => `<option>${s}</option>`).join('');
+  const labels = [...new Set(rows.map(r => r.label || '(none)'))];
+  $('fLabel').innerHTML = '<option value="">any skill label</option>' + labels.map(s => `<option>${s}</option>`).join('');
+  for (const [id, k] of [['fSet', 'set'], ['fState', 'state'], ['fLabel', 'label'], ['fText', 'text']]) $(id).value = store.get(k, $(id).value);
+  groupOptions(); $('fGroup').value = store.get('group', '');
+  const [want, fr] = decodeURIComponent(location.hash.slice(1)).split('@');   // #STUB or #STUB@frame
+  if (fr && /^\d+$/.test(fr)) pendingFrame = +fr;
+  if (want && rows.some(r => r.stub === want)) {          // a link to one rep: clear filters that would hide it
+    const r = rows.find(x => x.stub === want);
+    if ($('fSet').value && $('fSet').value !== r.set) $('fSet').value = '';
+    groupOptions();
+    if ($('fGroup').value && $('fGroup').value !== r.group) $('fGroup').value = '';
+    $('fState').value = 'all'; $('fLabel').value = ''; $('fText').value = '';
+  }
+  applyFilter(want || store.get('stub', null));
+});
+
+function groupOptions() {
+  const s = $('fSet').value, cnt = {};
+  rows.forEach(r => { if (!s || r.set === s) cnt[r.group] = (cnt[r.group] || 0) + 1; });
+  const keep = $('fGroup').value;
+  $('fGroup').innerHTML = '<option value="">all groups</option>' +
+    Object.keys(cnt).sort().map(g => `<option value="${g}">${g} (${cnt[g]})</option>`).join('');
+  if (cnt[keep]) $('fGroup').value = keep;
+}
+
+function applyFilter(keepStub) {
+  const s = $('fSet').value, g = $('fGroup').value, st = $('fState').value, lb = $('fLabel').value,
+        q = $('fText').value.trim().toLowerCase();
+  view = rows.filter(r => (!s || r.set === s) && (!g || r.group === g) && (!lb || (r.label || '(none)') === lb)
+    && (st === 'all' || (st === 'todo') === !(r.verdict || r.notes))
+    && (!q || (r.stub + ' ' + r.reasons + ' ' + r.setup_reasons + ' ' + r.notes + ' ' + r.verdict + ' ' + r.sync_detail).toLowerCase().includes(q)));
+  const done = view.filter(r => r.verdict || r.notes).length;
+  $('count').textContent = `${view.length} reps · ${done} reviewed`;
+  renderList();
+  let i = keepStub ? view.findIndex(r => r.stub === keepStub) : -1;
+  show(i >= 0 ? i : (view.length ? 0 : -1));
+}
+for (const [id, k] of [['fSet', 'set'], ['fGroup', 'group'], ['fState', 'state'], ['fLabel', 'label']])
+  $(id).onchange = () => { store.set(k, $(id).value); if (id === 'fSet') { groupOptions(); store.set('group', $('fGroup').value); } flush(); applyFilter(view[cur] && view[cur].stub); };
+$('fText').oninput = () => { store.set('text', $('fText').value); applyFilter(view[cur] && view[cur].stub); };
+
+function renderList() {
+  const L = $('list'); L.innerHTML = '';
+  const frag = document.createDocumentFragment();
+  view.forEach((r, i) => {
+    const d = document.createElement('div'); d.className = 'item'; d.dataset.i = i;
+    d.innerHTML = `<div class="s">${r.stub} <span style="color:var(--dim)">${r.label || ''}</span></div>
+      <div class="g">${r.group}</div>${r.verdict ? `<div class="v">✓ ${esc(r.verdict)}</div>` : (r.notes ? '<div class="v">✓ note</div>' : '')}`;
+    d.onclick = () => { flush(); show(i); };
+    frag.append(d);
+  });
+  L.append(frag);
+}
+const esc = s => String(s).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+
+// ---------- show a rep ----------
+function show(i) {
+  pause();
+  document.querySelectorAll('.item.cur').forEach(e => e.classList.remove('cur'));
+  cur = i;
+  if (i < 0) { $('stub').textContent = 'no reps match'; $('info').innerHTML = ''; vids.forEach(v => v.removeAttribute('src'));
+    skel = null; $('bonePanel').innerHTML = ''; drawSkel(); return; }
+  const r = view[i];
+  store.set('stub', r.stub);
+  try { history.replaceState(null, '', '#' + encodeURIComponent(r.stub)); } catch (e) {}
+  const el = $('list').children[i]; if (el) { el.classList.add('cur'); el.scrollIntoView({ block: 'nearest' }); }
+  $('stub').textContent = r.stub;
+  const cls = r.stage_failed === 'usable' ? 'ok' : (/^0[1-4]/.test(r.group) ? 'warn' : 'bad');
+  $('pills').innerHTML = [`<span class="pill ${cls}">${esc(r.group)}</span>`, `<span class="pill">${esc(r.task)}</span>`,
+    r.label ? `<span class="pill">${esc(r.label)}</span>` : '', `<span class="pill">split: ${esc(r.split)}</span>`].join(' ');
+  const L = r.lag; lag = [0, L[1], L[2]];
+  $('lagtxt').textContent = `(${L[3]}: cam2 ${fmtLag(L[1])}, cam3 ${fmtLag(L[2])})`;
+  const bad = (r.bad_cams || '').split(',').filter(Boolean).map(Number);
+  const moved = [...(r.reasons || '').matchAll(/camera (\d) moved/g)].map(m => +m[1]);
+  n = [0, 0, 0]; pts = [[], [], []];
+  const tk = ++token;
+  vids.forEach((v, c) => {
+    fetch(`/api/pts/${encodeURIComponent(r.stub)}/${c + 1}`).then(x => x.json()).then(p => {
+      if (tk !== token || !Array.isArray(p) || !p.length) return;
+      pts[c] = p; n[c] = p.length;
+      vrate[c] = p.length > 1 ? (p.length - 1) / (p[p.length - 1] - p[0]) : 25;
+      range();
+    }).catch(() => {});
+    v.src = `/video/${encodeURIComponent(r.stub)}/${c + 1}`;
+    boxes[c].classList.toggle('bad', bad.includes(c + 1));
+    boxes[c].classList.toggle('moved', moved.includes(c + 1));
+    boxes[c].dataset.flag = bad.includes(c + 1) ? 'over reprojection limit' : (moved.includes(c + 1) ? 'camera moved' : '');
+  });
+  skel = null; sstats = null; sideBox = null;
+  $('bonePanel').innerHTML = '<div class="sub">re-triangulating…</div>';
+  fetch(`/api/skel/${encodeURIComponent(r.stub)}`).then(x => x.json()).then(s => {
+    if (tk !== token) return;
+    skel = s; sideBox = s.available ? sideBounds(s) : null;
+    if (pendingFrame !== null) { f = pendingFrame; pendingFrame = null; }
+    else if (s.available && Math.floor(f) < s.start[0]) f = s.start[0];      // open on the first triangulated frame
+    bonePanel(); draw(true);
+    if (s.available) fetch(`/api/setupstats/${encodeURIComponent(r.stub)}`).then(x => x.json()).then(st => {
+      if (tk !== token) return; sstats = st; bonePanel();
+    });
+  }).catch(e => { if (tk === token) $('bonePanel').innerHTML = `<div class="sub">skeleton failed: ${esc(e.message)}</div>`; });
+  f = 0; range();
+  info(r);
+  $('notes').value = r.notes || '';
+  markTags(r);
+  $('saved').textContent = r.verdict || r.notes ? 'reviewed' : 'not reviewed yet';
+}
+const fmtLag = x => (x > 0 ? '+' : '') + x;
+
+function info(r) {
+  const row = (k, v, c = '') => v === '' || v === undefined || v === null ? '' : `<dt>${k}</dt><dd class="${c}">${esc(v)}</dd>`;
+  const reasons = (r.reasons || '').split('; ').filter(Boolean).map(x => `<div>${esc(x)}</div>`).join('');
+  const sreasons = (r.setup_reasons || '').split('; ').filter(Boolean).map(x => `<div>${esc(x)}</div>`).join('');
+  $('info').innerHTML =
+    row('stage failed', r.stage_failed) +
+    (reasons ? `<dt>rep reasons</dt><dd class="reason">${reasons}</dd>` : '') +
+    (sreasons ? `<dt>setup reasons</dt><dd class="reason">${sreasons}</dd>` : '') +
+    row('bad cameras', r.bad_cams, 'reason') +
+    row('sync', r.sync_status + (r.sync_detail ? ' — ' + r.sync_detail : ''), r.sync_status === 'OK' ? '' : 'reason') +
+    row('weakest pair corr', r.sync_min_corr) +
+    row('frames (raw / synced / usable)', [r.frames_raw, r.n_frames, r.n_usable_frames].map(x => x || '–').join(' / ')) +
+    row('rep bone dev', r.bone_dev) + row('rep reproj ÷ setup', r.reproj_over_session) +
+    row('session bone CV %', r.session_bone_cv);
+}
+
+// ---------- timeline ----------
+function camFrame(c) { return Math.floor(f) - ($('syncOn').checked ? lag[c] : 0); }
+function range() {
+  const s = $('syncOn').checked;
+  const L = s ? lag : [0, 0, 0];
+  const nn = n.map((x, c) => x || (c === 0 ? 1 : 0));
+  fmin = Math.min(...L.map((l, c) => nn[c] ? l : 0));
+  fmax = Math.max(...nn.map((x, c) => x ? x + L[c] - 1 : 0));
+  if (n.every(x => x)) f = Math.min(Math.max(f, fmin), fmax);   // only once every camera's length is known
+  $('scrub').min = fmin; $('scrub').max = fmax;
+  draw(true);
+}
+function draw(force) {
+  for (let c = 0; c < 3; c++) {
+    const v = vids[c], t = camFrame(c), out = !n[c] || t < 0 || t >= n[c];
+    boxes[c].classList.toggle('out', out && n[c] > 0);
+    const flag = boxes[c].dataset.flag ? `<span class="flag">${boxes[c].dataset.flag}</span>` : '';
+    caps[c].innerHTML = `<span>${CAMS[c]} ${flag}</span><span>${n[c] ? (out ? '—' : t) + ' / ' + (n[c] - 1) : '…'}</span>`;
+    if (!n[c]) continue;
+    if (out) { if (!v.paused) v.pause(); continue; }
+    if (v.readyState < 1) continue;                     // no metadata yet: loadedmetadata redraws
+    const want = frameTime(c, t), have = frameAt(c, v.currentTime);
+    if (playing) {
+      v.playbackRate = Math.min(16, Math.max(0.0625, speed() * DFPS / vrate[c]));
+      if (v.paused) { v.currentTime = want; v.play().catch(() => {}); }
+      else if (Math.abs(have - t) > 2 && !v.seeking) v.currentTime = want;
+    } else {
+      if (!v.paused) v.pause();
+      if (force || (have !== t && !v.seeking)) v.currentTime = want;
+    }
+  }
+  $('scrub').value = Math.floor(f);
+  $('fr').textContent = `frame ${Math.floor(f)}  (${(Math.floor(f) / DFPS).toFixed(2)} s)`;
+  drawSkel();
+}
+
+// ---------- skeleton: overlay on each video, side view, bone panel ----------
+const COL = { ok: '#3fb950', warn: '#f0b429', bad: '#ff6b6b' };
+const devCol = d => d === null || d === undefined ? null : (Math.abs(d) <= 0.12 ? COL.ok : (Math.abs(d) <= 0.25 ? COL.warn : COL.bad));
+const FACE = [0, 15, 16, 17, 18];
+function shownFrame(c) {          // the frame the video is actually displaying (playback can lag the clock by a frame or two)
+  const v = vids[c];
+  if (playing && v.readyState >= 2 && !v.seeking && pts[c].length) return frameAt(c, v.currentTime);
+  return camFrame(c);
+}
+function fitCanvas(cv) {
+  const r = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== Math.round(w * r) || cv.height !== Math.round(h * r)) { cv.width = Math.round(w * r); cv.height = Math.round(h * r); }
+  const g = cv.getContext('2d'); g.setTransform(r, 0, 0, r, 0, 0); g.clearRect(0, 0, w, h); return [g, w, h];
+}
+function drawBones(g, P, D, map, lw) {
+  // P: 25 x [a,b] (null where missing), D: per-bone deviation, map: [a,b] -> canvas xy
+  skel.bones.forEach(([a, b, k], j) => {
+    if (!P[a] || !P[b] || P[a][0] === null || P[b][0] === null) return;
+    const col = devCol(D[j]); if (!col) return;
+    const [x1, y1] = map(P[a]), [x2, y2] = map(P[b]);
+    g.strokeStyle = col; g.lineWidth = skel.long_bones.includes(k) ? lw : lw * 0.6;
+    g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke();
+  });
+  g.fillStyle = '#ffffffcc';
+  P.forEach((p, i) => { if (!p || p[0] === null || i > 18) return; const [x, y] = map(p);
+    g.beginPath(); g.arc(x, y, FACE.includes(i) ? lw * 0.45 : lw * 0.6, 0, 7); g.fill(); });
+}
+function drawSkel() {
+  const on = $('ovOn').checked && skel && skel.available;
+  for (let c = 0; c < 3; c++) {
+    const [g, w, h] = fitCanvas(ovs[c]);
+    if (!on) continue;
+    const row = shownFrame(c) - skel.start[c];
+    if (row < 0 || row >= skel.T) continue;
+    g.lineCap = 'round';
+    drawBones(g, skel.proj[c][row], skel.dev[row], p => [p[0] * w, p[1] * h], Math.max(2, w / 220));
+  }
+  drawSide();
+  boneFrame();
+}
+function sideBounds(s) {
+  // 2nd-98th percentile of the rep's points, so a few wild frames don't shrink the child to a dot
+  const us = [], zs = [];
+  s.side.forEach(fr => fr.forEach(p => { if (p && p[0] !== null) { us.push(p[0]); zs.push(p[1]); } }));
+  if (!us.length) return null;
+  us.sort((a, b) => a - b); zs.sort((a, b) => a - b);
+  const q = (a, x) => a[Math.min(a.length - 1, Math.max(0, Math.round(x * (a.length - 1))))];
+  const u0 = q(us, 0.02), u1 = q(us, 0.98), z1 = Math.max(q(zs, 0.98), 0.3);
+  const pad = 0.15 * Math.max(u1 - u0, z1, 0.5);
+  return { u0: u0 - pad, u1: u1 + pad, z0: -0.05, z1: z1 + pad };
+}
+function drawSide() {
+  const [g, w, h] = fitCanvas($('sideCv'));
+  g.font = '12px -apple-system, sans-serif';
+  if (!skel || !skel.available || !sideBox) {
+    g.fillStyle = '#8b949e'; g.textAlign = 'center';
+    g.fillText(skel ? (skel.why || 'no triangulated points') : 'loading…', w / 2, h / 2); return;
+  }
+  const B = sideBox, sc = Math.min((w - 20) / (B.u1 - B.u0), (h - 20) / (B.z1 - B.z0));
+  const ox = (w - sc * (B.u1 - B.u0)) / 2, oy = h - 10;
+  const map = p => [ox + (p[0] - B.u0) * sc, oy - (p[1] - B.z0) * sc];
+  // floor and a 10 cm grid along it
+  g.strokeStyle = '#3a424d'; g.lineWidth = 1;
+  const [fx0, fy] = map([B.u0, 0]), [fx1] = map([B.u1, 0]);
+  g.beginPath(); g.moveTo(fx0, fy); g.lineTo(fx1, fy); g.stroke();
+  g.fillStyle = '#3a424d';
+  for (let u = Math.ceil(B.u0 * 10) / 10; u <= B.u1; u += 0.1) { const [x] = map([u, 0]); g.fillRect(x, fy, 1, 4); }
+  g.fillStyle = '#8b949e'; g.textAlign = 'left';
+  g.fillText(skel.cam1_depth < B.u0 ? '← toward camera 1' : 'camera 1 →', 8, 16);
+  g.textAlign = 'right'; g.fillText('floor frame · 10 cm ticks', w - 8, 16);
+  const row = Math.floor(f) - skel.start[0];          // camera 1's frame is the master clock
+  if (row < 0 || row >= skel.T) { g.textAlign = 'center'; g.fillText('no data at this frame', w / 2, h / 2); return; }
+  g.lineCap = 'round';
+  drawBones(g, skel.side[row], skel.dev[row], map, 4);
+}
+const pct = (d, sign = true) => d === null || d === undefined ? '–' : (sign && d > 0 ? '+' : '') + (100 * d).toFixed(0) + '%';
+function boneFrame() {
+  const el = document.getElementById('boneFrameRow'); if (!el || !skel || !skel.available) return;
+  const row = Math.floor(f) - skel.start[0];
+  const keys = ['torso', 'upperarm', 'forearm', 'thigh', 'shank', 'clavicle', 'hip_offset'];
+  const cell = d => `<td class="${d === null || d === undefined ? '' : (Math.abs(d) <= .12 ? 'c-ok' : Math.abs(d) <= .25 ? 'c-warn' : 'c-bad')}">${pct(d)}</td>`;
+  const at = (k, sd) => { if (row < 0 || row >= skel.T) return null; const j = skel.bones.findIndex(b => b[2] === k && b[3] === sd); return j < 0 ? null : skel.dev[row][j]; };
+  el.innerHTML = keys.map(k => `<tr class="${skel.long_bones.includes(k) ? '' : 'short'}"><td>${k}</td>` +
+    (k === 'torso' ? cell(at(k, '-')) + '<td></td>' : cell(at(k, 'L')) + cell(at(k, 'R'))) +
+    cell(skel.rep_dev[k]) + '</tr>').join('');
+}
+function bonePanel() {
+  const P = $('bonePanel');
+  if (!skel) { P.innerHTML = '<div class="sub">re-triangulating…</div>'; return; }
+  if (!skel.available) { P.innerHTML = `<div class="sub">No 3D for this rep: ${esc(skel.why)}</div>`; return; }
+  const g = skel.rep_bone_dev_gate;
+  let h = `<div class="sub">Length vs the setup's median bone (setup ${skel.setup}). The rep gate fails a rep whose median
+    long bone (bold rows) is more than ${100 * g}% off; the joint gate drops a bone's joints in any frame it is more than
+    ${100 * skel.joint_bone_dev_gate}% off.</div>
+    <table class="bt"><tr><th>bone</th><th>this frame L</th><th>R</th><th>rep median</th></tr><tbody id="boneFrameRow"></tbody></table>`;
+  if (!sstats) h += '<div class="sub" style="margin-top:10px">computing the setup\'s bone CVs (re-triangulating every rep in the setup)…</div>';
+  else if (!sstats.available) h += `<div class="sub">${esc(sstats.why)}</div>`;
+  else {
+    const cv = x => x === null || x === undefined ? '–' : x.toFixed(1);
+    const cvc = x => x === null || x === undefined ? '' : (x > sstats.gate ? 'c-warn' : '');
+    h += `<div class="sub" style="margin-top:12px">Setup ${sstats.setup} (${sstats.n_reps} reps), CV % over all triangulated frames.
+      Session gate: median of the 5 long bones' CV on the calibration frames = <b>${cv(sstats.session_long_cv)}%</b>
+      (max ${sstats.gate}%). Same median here: robust <b>${cv(sstats.median_long_robust_cv)}%</b>, plain ${cv(sstats.median_long_pooled_cv)}%.
+      Robust CV ignores outlier frames; plain CV much above robust means a few bad frames, both high means the bone stretches throughout.</div>
+      <table class="bt"><tr><th>bone</th><th>robust</th><th>plain</th><th>L</th><th>R</th><th>L vs R</th></tr>` +
+      sstats.rows.sort((a, b) => b.long - a.long).map(r => `<tr class="${r.long ? '' : 'short'}"><td>${r.long ? '<b>' + r.bone + '</b>' : r.bone}</td>
+        <td class="${cvc(r.robust_cv)}">${cv(r.robust_cv)}</td><td class="${cvc(r.pooled_cv)}">${cv(r.pooled_cv)}</td>
+        <td>${cv(r.L_cv)}</td><td>${cv(r.R_cv)}</td>
+        <td class="${r.LR_diff !== null && Math.abs(r.LR_diff) > 5 ? 'c-warn' : ''}">${r.LR_diff === null ? '–' : (r.LR_diff > 0 ? '+' : '') + r.LR_diff.toFixed(1) + '%'}</td></tr>`).join('') +
+      '</table><div class="sub">L vs R = left median length ÷ right − 1.</div>';
+  }
+  P.innerHTML = h;
+  boneFrame();
+}
+window.addEventListener('resize', () => drawSkel());
+const speed = () => parseFloat($('speed').value);
+function loop(ts) {
+  if (playing) {
+    const dt = last ? (ts - last) / 1000 : 0; last = ts;
+    f += dt * DFPS * speed();
+    if (f > fmax + 0.999) f = fmin;
+    draw(false);
+  }
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+function play() { if (cur < 0) return; playing = true; last = 0; $('bPlay').textContent = '❚❚ pause'; }
+function pause() { playing = false; $('bPlay').textContent = '▶︎ play'; vids.forEach(v => v.pause()); }
+function step(k) { pause(); f = Math.min(Math.max(Math.floor(f) + k, fmin), fmax); draw(true); }
+$('bPlay').onclick = () => playing ? pause() : play();
+$('bBack').onclick = () => step(-1); $('bFwd').onclick = () => step(1);
+$('bPrev').onclick = () => go(-1); $('bNext').onclick = () => go(1);
+$('scrub').oninput = () => { pause(); f = +$('scrub').value; draw(true); };
+$('syncOn').onchange = () => range();
+$('ovOn').checked = store.get('overlay', true);
+$('ovOn').onchange = () => { store.set('overlay', $('ovOn').checked); drawSkel(); };
+$('speed').onchange = () => draw(false);
+function go(k) { if (!view.length) return; flush(); show(Math.min(Math.max(cur + k, 0), view.length - 1)); }
+
+// ---------- verdict + notes ----------
+function tagsOf(r) { return (r.verdict || '').split('; ').filter(Boolean); }
+function markTags(r) { const t = tagsOf(r); document.querySelectorAll('.tagbtn').forEach(b => b.classList.toggle('on', t.includes(b.dataset.tag))); }
+function toggleTag(t) {
+  if (cur < 0) return; const r = view[cur]; let tags = tagsOf(r);
+  tags = tags.includes(t) ? tags.filter(x => x !== t) : [...tags, t];
+  tags.sort((a, b) => TAGS.indexOf(a) - TAGS.indexOf(b));
+  r.verdict = tags.join('; '); markTags(r); save(true);
+}
+$('notes').oninput = () => { if (cur < 0) return; view[cur].notes = $('notes').value; dirty = true; $('saved').textContent = 'editing…';
+  clearTimeout(saveTimer); saveTimer = setTimeout(() => save(false), 700); };
+function flush() { if (dirty) save(false); }
+function save(relist) {
+  if (cur < 0) return; const r = view[cur]; clearTimeout(saveTimer); dirty = false;
+  fetch('/api/save', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ stub: r.stub, notes: r.notes || '', verdict: r.verdict || '' }) })
+    .then(x => { if (!x.ok) throw new Error(x.status); $('saved').textContent = 'saved ' + new Date().toLocaleTimeString(); })
+    .catch(e => { $('saved').textContent = '⚠︎ NOT saved (' + e.message + ') — is viewer.py still running?'; dirty = true; });
+  const el = $('list').children[cur];
+  if (el) { const v = el.querySelector('.v'); const txt = r.verdict ? '✓ ' + esc(r.verdict) : (r.notes ? '✓ note' : '');
+    if (v) v.innerHTML = txt; else if (txt) el.insertAdjacentHTML('beforeend', `<div class="v">${txt}</div>`); }
+  const done = view.filter(x => x.verdict || x.notes).length;
+  $('count').textContent = `${view.length} reps · ${done} reviewed`;
+}
+window.addEventListener('beforeunload', flush);
+
+// ---------- keys ----------
+document.addEventListener('keydown', e => {
+  const typing = ['TEXTAREA', 'INPUT', 'SELECT'].includes(document.activeElement.tagName);
+  if (typing) {
+    if (e.key === 'Escape') { document.activeElement.blur(); flush(); }
+    else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && document.activeElement.id === 'notes') { e.preventDefault(); document.activeElement.blur(); go(1); }
+    return;
+  }
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key;
+  if (k === ' ') { e.preventDefault(); playing ? pause() : play(); }
+  else if (k === 'ArrowLeft') { e.preventDefault(); step(e.shiftKey ? -10 : -1); }
+  else if (k === 'ArrowRight') { e.preventDefault(); step(e.shiftKey ? 10 : 1); }
+  else if (k === 'ArrowUp' || k === 'k') { e.preventDefault(); go(-1); }
+  else if (k === 'ArrowDown' || k === 'j') { e.preventDefault(); go(1); }
+  else if (/^[1-8]$/.test(k)) toggleTag(TAGS[+k - 1]);
+  else if (k === '0' && cur >= 0) { view[cur].verdict = ''; markTags(view[cur]); save(true); }
+  else if (k === 's') { $('syncOn').checked = !$('syncOn').checked; range(); }
+  else if (k === 'o') { $('ovOn').checked = !$('ovOn').checked; store.set('overlay', $('ovOn').checked); drawSkel(); }
+  else if (k === 'n') { e.preventDefault(); $('notes').focus(); }
+  else if (k === '[' || k === ']') { const s = $('speed'); s.selectedIndex = Math.min(Math.max(s.selectedIndex + (k === ']' ? 1 : -1), 0), s.options.length - 1); draw(false); }
+});
+</script>
+</body>
+</html>
