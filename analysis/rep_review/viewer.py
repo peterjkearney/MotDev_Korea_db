@@ -34,20 +34,21 @@ FFPROBE = shutil.which('ffprobe') or '/usr/local/bin/ffprobe'
 sys.path.insert(0, HERE)
 import skeleton   # noqa: E402  (re-triangulation for the skeleton overlay / side view / bone panel)
 SHOW = ['set', 'group', 'stub', 'child', 'task', 'action', 'rep', 'label', 'split', 'stage_failed', 'reasons',
-        'setup_reasons', 'bad_cams', 'sync_status', 'sync_detail', 'sync_min_corr', 'frames_raw', 'n_frames',
+        'setup_reasons', 'bad_cams', 'sync_status', 'sync_detail', 'sync_min_corr', 'sync_overlap', 'sync_max_lag',
+        'frames_raw', 'n_frames',
         'n_usable_frames', 'bone_dev', 'reproj_over_session', 'session_bone_cv', 'notes', 'verdict']
 
 
 def load_lags(sets):
     lags = {}
     for S in sets:
-        p = f'{ROOT}/{S}/Aligned/sync_status.csv'
+        p = f'{ROOT}/{S}/{skeleton.ALIGNED}/sync_status.csv'
         if os.path.exists(p):
             d = pd.read_csv(p)
             for s, a, b in zip(d.stub, d.lag12, d.lag13):
                 if np.isfinite(a) and np.isfinite(b):
                     lags[s] = [0, int(a), int(b), 'align_cameras']
-        p = f'{ROOT}/{S}/GT3D/reps.csv'
+        p = f'{ROOT}/{S}/{skeleton.GT3D}/reps.csv'
         if os.path.exists(p):
             d = pd.read_csv(p, dtype=str)
             for s, l in zip(d.stub, d.sync_lag):
@@ -72,6 +73,26 @@ def frame_times(path):
     with _pts_lock:
         _pts_cache[path] = pts
     return pts
+
+
+def all_people(path):
+    """Every person OpenPose detected, per JSON frame (= video frame): [[[x/1920, y/1080, conf] x 25] per person].
+    The dataset's wireframe renders draw only the first person of each frame; this lets the page draw them all
+    (bystanders standing still also show whether a camera moved).  Undetected joints -> null."""
+    with open(path) as f:
+        d = json.load(f)
+    out = []
+    for fr in d['data']:
+        people = []
+        for sk in fr.get('skeleton', []):
+            xy, sc = sk.get('pose', []), sk.get('score', [])
+            if len(xy) < 50 or len(sc) < 25:
+                continue
+            people.append([None if (xy[2 * j] == 0 and xy[2 * j + 1] == 0) or sc[j] <= 0 else
+                           [round(xy[2 * j] / 1920, 4), round(xy[2 * j + 1] / 1080, 4), round(sc[j], 2)]
+                           for j in range(25)])
+        out.append(people)
+    return out
 
 
 class State:
@@ -140,6 +161,16 @@ def make_handler(state):
                 except Exception as e:                       # a broken rep must not take the viewer down
                     out = {'available': False, 'why': f'error: {type(e).__name__}: {e}'}
                 return self._send(200, json.dumps(out).encode())
+            m = re.fullmatch(r'/api/people/([^/]+)/([123])', u.path)
+            if m:
+                stub, cam = m.groups()
+                i = state.idx.get(stub)
+                if i is None:
+                    return self._send(404, b'{}')
+                p = os.path.realpath(os.path.join(ROOT, state.df.at[i, 'set'], f'{stub}_{cam}.json'))
+                if not p.startswith(root_real + os.sep) or not os.path.isfile(p):
+                    return self._send(200, b'[]')
+                return self._send(200, json.dumps(all_people(p)).encode())
             m = re.fullmatch(r'/(video|api/pts)/([^/]+)/([123])', u.path)
             if m:
                 kind, stub, cam = m.groups()
@@ -204,7 +235,10 @@ def main():
     ap.add_argument('--csv', default=f'{ROOT}/rep_review.csv')
     ap.add_argument('--port', type=int, default=8765)
     ap.add_argument('--no-browser', action='store_true')
+    ap.add_argument('--aligned', default=skeleton.ALIGNED, help='folder under {root}/{set}: synced reps + sync_status.csv')
+    ap.add_argument('--gt3d', default=skeleton.GT3D, help='folder under {root}/{set}: the GT3D build to show')
     a = ap.parse_args()
+    skeleton.ALIGNED, skeleton.GT3D = a.aligned, a.gt3d     # before State(): load_lags reads them
     state = State(a.csv)
     srv = ThreadingHTTPServer(('127.0.0.1', a.port), make_handler(state))
     url = f'http://127.0.0.1:{a.port}/'

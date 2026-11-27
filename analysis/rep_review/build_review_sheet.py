@@ -16,6 +16,8 @@ camera 1 front, 2 right 45 deg, 3 left 45 deg.  `notes` and `verdict` are empty 
 
     python analysis/rep_review/build_review_sheet.py                 # A, B, C -> {root}/rep_review.csv
     python analysis/rep_review/build_review_sheet.py --sets B,C --out x.csv
+    python analysis/rep_review/build_review_sheet.py --aligned Aligned_v5 --gt3d GT3D_v5 --out {root}/rep_review_v5.csv
+      (then viewer.py --csv {root}/rep_review_v5.csv --aligned Aligned_v5 --gt3d GT3D_v5)
 Refuses to overwrite an existing sheet (it holds your notes) unless --force.
 """
 import argparse, glob, json, os, re, sys
@@ -29,9 +31,14 @@ TASKS = {'A': {1: 'stairs up', 2: 'stairs down', 3: 'overhead throw', 4: 'one fo
          'B': {1: 'one foot >3 s', 2: 'hop one foot', 3: 'two-foot jump', 4: 'catch ball'},
          'C': {1: 'stop rolling ball', 2: 'bounce ball', 3: 'jump over rope', 4: 'jump rope'}}
 EXCLUDED = {'A': ('1', '2'), 'B': (), 'C': ()}
+ALIGNED, GT3D = 'Aligned', 'GT3D'      # --aligned / --gt3d
 
 # review order
+SHORT_SYNC = 60          # a usable rep synced on fewer overlapping frames than this (align_cameras' relative
+                         # min_overlap allows it for short reps) goes to group 00a/00b: check its sync by eye
 GROUPS = [
+    '00a sync: short overlap, weak or large lag',   # weakest pair corr < 0.5, or an offset > 10 frames
+    '00b sync: short overlap',
     '01 setup: bone CV <=10% only',
     '02 setup: stature unmeasurable only',
     '03 rep: one camera off (reprojection)',
@@ -62,14 +69,14 @@ def setup_group(reasons):
             kinds.add(k)
     cvs = [float(x) for x in re.findall(r'long-bone CV ([\d.]+)%', t)]
     if kinds == {'cv'}:
-        return GROUPS[0] if max(cvs) <= 10 else GROUPS[7]
+        return GROUPS[2] if max(cvs) <= 10 else GROUPS[9]
     if kinds == {'stature'}:
-        return GROUPS[1]
+        return GROUPS[3]
     if kinds == {'reproj'}:
-        return GROUPS[8]
+        return GROUPS[10]
     if kinds and kinds <= {'roll', 'floor'}:
-        return GROUPS[9]
-    return GROUPS[10]
+        return GROUPS[11]
+    return GROUPS[12]
 
 
 def rep_kinds(reasons):
@@ -80,7 +87,10 @@ def rep_kinds(reasons):
         if x.startswith('bone lengths'): k.add('bone')
         elif x.startswith('reprojection'): k.add('reproj')
         elif 'usable frames' in x or 'usable fraction' in x: k.add('frames')
-        elif 'moved' in x or 'cannot explain' in x or 'fits none' in x: k.add('moved')
+        elif ('moved' in x or 'cannot explain' in x or 'fits none' in x
+              # --setup-search cluster (GT3D_v5): moving-camera check, unfittable groups, A..B..A outliers
+              or 'camera moving' in x or 'cannot be calibrated' in x or 'outlier within its action' in x):
+            k.add('moved')
         else: k.add('other')
     return k
 
@@ -107,12 +117,12 @@ def build_set(S, splits):
         if not n.startswith('._'):
             vids.setdefault(n[:-4].replace('[SHANA]', ''), p)
 
-    sync = pd.read_csv(f'{ROOT}/{S}/Aligned/sync_status.csv').set_index('stub')
+    sync = pd.read_csv(f'{ROOT}/{S}/{ALIGNED}/sync_status.csv').set_index('stub')
 
     # GT3D per session: rep records + setup verdicts
     gt = {}
     sess = {}
-    for f in glob.glob(f'{ROOT}/{S}/GT3D/*/session_summary.json'):
+    for f in glob.glob(f'{ROOT}/{S}/{GT3D}/*/session_summary.json'):
         d = json.load(open(f))
         sess[d['subject']] = d
         setups = d.get('setups') or [d]
@@ -132,10 +142,14 @@ def build_set(S, splits):
             cs = [sy[c] for c in ('corr12', 'corr13', 'corr23') if pd.notna(sy[c])]
             row['sync_min_corr'] = round(min(cs), 2) if cs else np.nan
             row['frames_raw'] = sy['frames_raw']
+            if 'sync_overlap' in sy.index and pd.notna(sy['sync_overlap']):
+                row['sync_overlap'] = int(sy['sync_overlap'])
+            if pd.notna(sy['lag12']) and pd.notna(sy['lag13']):
+                row['sync_max_lag'] = int(max(abs(sy['lag12']), abs(sy['lag13'])))
         if row['sync_status'] != 'OK':
             stage, grp = 'sync', next((g for g in GROUPS if g.endswith('sync: ' + str(row['sync_status']))), '16 sync: no person track')
         elif action in EXCLUDED[S]:
-            stage, grp = 'excluded', GROUPS[16]
+            stage, grp = 'excluded', GROUPS[18]
         elif s in gt:
             r, st = gt[s]
             row.update(n_frames=r['n_frames'], n_usable_frames=r['n_usable_frames'],
@@ -147,19 +161,23 @@ def build_set(S, splits):
             with np.errstate(invalid='ignore', divide='ignore'):
                 row['bad_cams'] = ','.join(str(c + 1) for c in range(3) if med[c] / cal[c] > 1.5)
             if r['usable']:
-                stage, grp = 'usable', GROUPS[17]
+                stage, grp = 'usable', GROUPS[19]
+                ov = row.get('sync_overlap', np.nan)
+                if pd.notna(ov) and ov < SHORT_SYNC:
+                    weak = row.get('sync_min_corr', 1) < 0.5 or row.get('sync_max_lag', 0) > 10
+                    grp = GROUPS[0] if weak else GROUPS[1]
             elif not st.get('usable', False):
                 stage, grp = 'setup', setup_group(st.get('reasons', []))
                 if rep_kinds(r['reasons']):
-                    grp = GROUPS[10] if grp in (GROUPS[0], GROUPS[1]) else grp   # not a clean near-miss
+                    grp = GROUPS[12] if grp in (GROUPS[2], GROUPS[3]) else grp   # not a clean near-miss
             else:
                 k = rep_kinds(r['reasons'])
                 stage = 'rep'
-                grp = {frozenset({'reproj'}): GROUPS[2], frozenset({'bone'}): GROUPS[3],
-                       frozenset({'frames'}): GROUPS[4], frozenset({'moved'}): GROUPS[5]}.get(frozenset(k), GROUPS[6])
+                grp = {frozenset({'reproj'}): GROUPS[4], frozenset({'bone'}): GROUPS[5],
+                       frozenset({'frames'}): GROUPS[6], frozenset({'moved'}): GROUPS[7]}.get(frozenset(k), GROUPS[8])
         else:
             d = sess.get(child)
-            stage, grp = 'calibration', GROUPS[11]
+            stage, grp = 'calibration', GROUPS[13]
             row['setup_reasons'] = '; '.join(d['reasons']) if d else 'no GT3D session'
         row['stage_failed'], row['group'] = stage, grp
         for c in (1, 2, 3):
@@ -173,18 +191,23 @@ def build_set(S, splits):
 
 
 def main():
+    global ALIGNED, GT3D
     ap = argparse.ArgumentParser()
     ap.add_argument('--sets', default='A,B,C')
     ap.add_argument('--out', default=f'{ROOT}/rep_review.csv')
     ap.add_argument('--force', action='store_true')
+    ap.add_argument('--aligned', default=ALIGNED, help='folder under {root}/{set} with sync_status.csv')
+    ap.add_argument('--gt3d', default=GT3D, help='folder under {root}/{set} with the GT3D build')
     a = ap.parse_args()
+    ALIGNED, GT3D = a.aligned, a.gt3d
     if os.path.exists(a.out) and not a.force:
         sys.exit(f'{a.out} exists (may hold your notes); pass --force to overwrite')
     sp = json.load(open(f'{REPO}/pipeline/datasets/korea/splits.json'))
     splits = {c: k for k in ('train', 'dev', 'test') for c in sp[k]}
     df = pd.concat([build_set(S, splits) for S in a.sets.split(',')], ignore_index=True)
     order = ['set', 'group', 'stub', 'child', 'task', 'action', 'rep', 'label', 'split', 'stage_failed',
-             'reasons', 'setup_reasons', 'bad_cams', 'sync_status', 'sync_detail', 'sync_min_corr',
+             'reasons', 'setup_reasons', 'bad_cams', 'sync_status', 'sync_detail', 'sync_min_corr', 'sync_overlap',
+             'sync_max_lag',
              'frames_raw', 'n_frames', 'n_usable_frames', 'bone_dev', 'reproj_over_session', 'session_bone_cv',
              'setup', 'open_cam1', 'open_cam2', 'open_cam3', 'notes', 'verdict',
              'video_cam1', 'video_cam2', 'video_cam3']

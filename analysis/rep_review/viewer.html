@@ -107,6 +107,7 @@ kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 3
       </label>
       <label title="S"><input type="checkbox" id="syncOn" checked> sync offsets <span id="lagtxt" style="color:var(--dim)"></span></label>
       <label title="O"><input type="checkbox" id="ovOn" checked> skeleton overlay</label>
+      <label title="P: every person OpenPose detected, drawn under the overlay (the dataset renders show only the first person per frame)"><input type="checkbox" id="allOn"> all people</label>
     </div>
     <div id="skelrow">
       <div class="box">
@@ -131,7 +132,7 @@ kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 3
         <textarea id="notes" placeholder="notes (N to focus, Esc to leave, ⌘/Ctrl+Enter = save and next rep)"></textarea>
         <div id="saved"></div>
         <div id="keys"><kbd>space</kbd> play · <kbd>←</kbd><kbd>→</kbd> frame (<kbd>shift</kbd> ×10) · <kbd>↑</kbd><kbd>↓</kbd>/<kbd>K</kbd><kbd>J</kbd> rep ·
-          <kbd>1</kbd>–<kbd>8</kbd> toggle tag · <kbd>0</kbd> clear · <kbd>S</kbd> sync · <kbd>O</kbd> overlay · <kbd>[</kbd><kbd>]</kbd> speed · <kbd>N</kbd> notes</div>
+          <kbd>1</kbd>–<kbd>8</kbd> toggle tag · <kbd>0</kbd> clear · <kbd>S</kbd> sync · <kbd>O</kbd> overlay · <kbd>P</kbd> all people · <kbd>[</kbd><kbd>]</kbd> speed · <kbd>N</kbd> notes</div>
       </div>
     </div>
   </main>
@@ -161,6 +162,7 @@ let n = [0, 0, 0], lag = [0, 0, 0];
 let saveTimer = null, dirty = false;
 const vids = [], boxes = [], caps = [], ovs = [];
 let skel = null, sstats = null, sideBox = null, pendingFrame = null;
+let people = [null, null, null];     // per camera: per video frame, every person OpenPose detected (from the JSON)
 
 // ---------- build video panes ----------
 for (let c = 0; c < 3; c++) {
@@ -258,8 +260,9 @@ function show(i) {
   $('lagtxt').textContent = `(${L[3]}: cam2 ${fmtLag(L[1])}, cam3 ${fmtLag(L[2])})`;
   const bad = (r.bad_cams || '').split(',').filter(Boolean).map(Number);
   const moved = [...(r.reasons || '').matchAll(/camera (\d) moved/g)].map(m => +m[1]);
-  n = [0, 0, 0]; pts = [[], [], []];
+  n = [0, 0, 0]; pts = [[], [], []]; people = [null, null, null];
   const tk = ++token;
+  if ($('allOn').checked) loadPeople(r.stub, tk);
   vids.forEach((v, c) => {
     fetch(`/api/pts/${encodeURIComponent(r.stub)}/${c + 1}`).then(x => x.json()).then(p => {
       if (tk !== token || !Array.isArray(p) || !p.length) return;
@@ -349,9 +352,14 @@ const COL = { ok: '#3fb950', warn: '#f0b429', bad: '#ff6b6b' };
 const devCol = d => d === null || d === undefined ? null : (Math.abs(d) <= 0.12 ? COL.ok : (Math.abs(d) <= 0.25 ? COL.warn : COL.bad));
 const FACE = [0, 15, 16, 17, 18];
 function shownFrame(c) {          // the frame the video is actually displaying (playback can lag the clock by a frame or two)
-  const v = vids[c];
-  if (playing && v.readyState >= 2 && !v.seeking && pts[c].length) return frameAt(c, v.currentTime);
-  return camFrame(c);
+  // Only a video that is PLAYING says which frame is on screen.  One the clock has run past (this camera's data ended
+  // before the others', e.g. the child left camera 3's view on landing) is paused wherever its last catch-up seek left
+  // it -- a different frame each loop -- so it must not decide what the overlays draw: use the clock (out of range ->
+  // nothing drawn).
+  const v = vids[c], t = camFrame(c);
+  if (t < 0 || t >= n[c]) return t;
+  if (playing && !v.paused && v.readyState >= 2 && !v.seeking && pts[c].length) return frameAt(c, v.currentTime);
+  return t;
 }
 function fitCanvas(cv) {
   const r = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
@@ -384,10 +392,43 @@ function drawBones(g, P, D, map, lw, row, cam) {
     }
   });
 }
+// ---------- every detected person (under the overlay) ----------
+const OP_BONES = [[1, 8], [1, 2], [1, 5], [2, 3], [3, 4], [5, 6], [6, 7], [8, 9], [9, 10], [10, 11], [8, 12], [12, 13],
+  [13, 14], [1, 0], [0, 15], [15, 17], [0, 16], [16, 18], [14, 19], [19, 20], [14, 21], [11, 22], [22, 23], [11, 24]];
+const PCOL = ['#7aa2f7', '#e0af68', '#bb9af7', '#73daca', '#f7768e'];   // by order in the JSON frame -- not a tracked identity
+function loadPeople(stub, tk) {
+  for (let c = 0; c < 3; c++)
+    fetch(`/api/people/${encodeURIComponent(stub)}/${c + 1}`).then(x => x.json()).then(p => {
+      if (tk !== token) return; people[c] = p; drawSkel();
+    }).catch(() => {});
+}
+function drawPeople(g, c, w, h) {
+  const P = people[c], fr = P && P[shownFrame(c)];
+  if (!fr) return;
+  const lw = Math.max(1, w / 400);
+  fr.forEach((J, k) => {
+    const col = PCOL[k % PCOL.length];
+    g.strokeStyle = col; g.fillStyle = col; g.lineWidth = lw;
+    OP_BONES.forEach(([a, b]) => {
+      if (!J[a] || !J[b]) return;
+      g.globalAlpha = Math.min(J[a][2], J[b][2]) > 0.5 ? 0.85 : 0.35;    // dim where OpenPose is unsure
+      g.beginPath(); g.moveTo(J[a][0] * w, J[a][1] * h); g.lineTo(J[b][0] * w, J[b][1] * h); g.stroke();
+    });
+    J.forEach(p => {
+      if (!p) return;
+      g.globalAlpha = p[2] > 0.5 ? 0.85 : 0.35;
+      g.beginPath(); g.arc(p[0] * w, p[1] * h, lw * 1.3, 0, 7); g.fill();
+    });
+  });
+  g.globalAlpha = 1;
+}
 function drawSkel() {
   const on = $('ovOn').checked && skel && skel.available;
+  const all = $('allOn').checked;
   for (let c = 0; c < 3; c++) {
     const [g, w, h] = fitCanvas(ovs[c]);
+    g.lineCap = 'round';
+    if (all) drawPeople(g, c, w, h);                    // underneath the colour-coded overlay
     if (!on) continue;
     const row = shownFrame(c) - skel.start[c];
     if (row < 0 || row >= skel.T) continue;
@@ -510,6 +551,13 @@ $('scrub').oninput = () => { pause(); f = +$('scrub').value; draw(true); };
 $('syncOn').onchange = () => range();
 $('ovOn').checked = store.get('overlay', true);
 $('ovOn').onchange = () => { store.set('overlay', $('ovOn').checked); drawSkel(); };
+$('allOn').checked = store.get('allPeople', false) || /[?&]people=1/.test(location.search);   // ?people=1 forces it on
+function allChanged() {
+  store.set('allPeople', $('allOn').checked);
+  if ($('allOn').checked && cur >= 0 && !people.some(Boolean)) loadPeople(view[cur].stub, token);
+  drawSkel();
+}
+$('allOn').onchange = allChanged;
 $('speed').onchange = () => draw(false);
 function go(k) { if (!view.length) return; flush(); show(Math.min(Math.max(cur + k, 0), view.length - 1)); }
 
@@ -557,6 +605,7 @@ document.addEventListener('keydown', e => {
   else if (/^[1-8]$/.test(k)) toggleTag(TAGS[+k - 1]);
   else if (k === '0' && cur >= 0) { view[cur].verdict = ''; markTags(view[cur]); save(true); }
   else if (k === 's') { $('syncOn').checked = !$('syncOn').checked; range(); }
+  else if (k === 'p') { $('allOn').checked = !$('allOn').checked; allChanged(); }
   else if (k === 'o') { $('ovOn').checked = !$('ovOn').checked; store.set('overlay', $('ovOn').checked); drawSkel(); }
   else if (k === 'n') { e.preventDefault(); $('notes').focus(); }
   else if (k === '[' || k === ']') { const s = $('speed'); s.selectedIndex = Math.min(Math.max(s.selectedIndex + (k === ']' ? 1 : -1), 0), s.options.length - 1); draw(false); }

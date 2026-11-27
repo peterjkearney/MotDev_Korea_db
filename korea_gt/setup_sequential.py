@@ -15,10 +15,11 @@ Here:
      cameras refitted.  At most PER_REP_CAP candidate frames per rep, so no rep dominates a setup.
   1. MOVING-CAMERA check, per rep, without any reference: calibrate from the rep alone, then follow each camera's
      offset (its point minus the other two cameras' triangulation, median per window) through N_WIN windows.  A
-     stationary camera's offset stays put; a moving one wanders.  Reps whose offsets wander > MOVE_PX are dropped.
+     stationary camera's offset stays put; a moving one wanders.  Slow joints only (SLOW_PX), so sync error
+     during fast movement can't pass for a moving camera.  Reps whose offsets wander > MOVE_PX are dropped.
   2. SEQUENTIAL segments WITHIN each action (rep order is trusted there; order across actions is not): seed a setup with the first stationary rep; test each next rep
-     against the setup's cameras (person choice + sync refined first) by its per-camera whole-body offset; if every
-     camera is within AGREE_PX, add it and refit; if not, look at the following rep -- if that agrees, the first was an
+     by calibrating it together with the setup's reps (person choice + sync refined first): if every rep's
+     per-camera whole-body offset is within AGREE_PX under the joint cameras, add it; if not, look at the following rep -- if that agrees, the first was an
      outlier (set aside); if it doesn't either, close the setup and start a new one from the first disagreeing rep.
   3. JOIN segments from different actions whose cameras agree, in any order, refit.
   4. Report each setup's quality (the build's session gates), each rep's error and offsets under its setup, and a
@@ -38,7 +39,11 @@ import camcal as cc            # noqa: E402
 
 CONF = 0.6
 MIN_JOINTS3 = 6          # joints conf > CONF in all 3 cameras for a frame to count
-PER_REP_CAP = 60         # candidate frames per rep (before select_spread)
+PER_REP_CAP = 60         # candidate frames per rep at least; scales up to SETUP_FRAMES / n_reps, so a small setup
+                         # (one rep) uses nearly all its frames while a big one stays balanced across reps
+SLOW_CAL_PX = 5.0        # calibration points only from joints moving slower than this (px/frame) in ALL 3 cameras:
+                         # sync error scales with speed (a frame off at 30 px/frame = 30 px); looser than SLOW_PX
+                         # so the points still spread over the image
 SETUP_FRAMES = 300       # frames per setup calibration
 MIN_FRAMES_REP = 20      # a single-rep calibration needs this many frames
 OUTLIER_PX = 15.0
@@ -46,23 +51,39 @@ N_WIN = 8
 MOVE_PX = 25.0           # a camera's windowed offset wandering more than this = moving   (to tune)
 AGREE_PX = 8.0           # a rep's whole-body offset per camera within this = same setup   (to tune)
 LOO_CONF = 0.5
+SLOW_PX = 3.0            # windowed offsets use only joints moving slower than this (px/frame) in that camera: in a
+                         # jump's take-off every joint moves one way, so a frame of sync error reads as an offset
+                         # (B015_GMS_3_4: last eighth at 34 px/frame gave a false 'moving camera')
 BODY = list(range(15))
+ALIGNED = 'Aligned'      # folder under {root}/{set} holding align_cameras' reps (--aligned; GT3D_v5 uses Aligned_v5)
+ALIGNED_PATH = None      # full path to that folder, when the caller (build_child_gt --data) knows it
 
 
 # ---------------------------------------------------------------- calibration ----
 
-def candidates_loose(reps):
+def image_speed(xy, conf):
+    """(T, 3, 25) px/frame of every joint in every camera (central difference; NaN where not seen)."""
+    p = np.where(((conf > LOO_CONF) & ~((xy[..., 0] == 0) & (xy[..., 1] == 0)))[..., None], xy, np.nan)
+    v = np.full(p.shape[:3], np.nan)
+    v[1:-1] = np.linalg.norm(p[2:] - p[:-2], axis=-1) / 2
+    return v
+
+
+def candidates_loose(reps, slow_px=SLOW_CAL_PX, cap=None):
     xy_out, vis_out, conf_out, meta = [], [], [], []
+    cap = cap or max(PER_REP_CAP, SETUP_FRAMES // max(len(reps), 1))
     for r in reps:
         xy, conf, _ = B.rep_span(r)
         if not len(xy):
             continue
         vis = (conf > CONF) & ~((xy[..., 0] == 0) & (xy[..., 1] == 0))
         v3 = vis.all(axis=1)                                   # (T, 25) seen confidently by all 3
+        if slow_px:
+            v3 &= np.nan_to_num(image_speed(xy, conf), nan=np.inf).max(axis=1) < slow_px
         good = np.where(v3.sum(1) >= MIN_JOINTS3)[0]
         if not len(good):
             continue
-        keep = good[::max(1, int(np.ceil(len(good) / PER_REP_CAP)))]
+        keep = good[::max(1, int(np.ceil(len(good) / cap)))]
         xy_out.append(xy[keep]); conf_out.append(conf[keep])
         vis_out.append(np.repeat(v3[keep][:, None, :], 3, axis=1))
         meta.extend((r['stub'].split('_')[0], r['stub'], int(t)) for t in keep)
@@ -73,20 +94,29 @@ def candidates_loose(reps):
                            subject_of_frame=np.zeros(len(meta), int))
 
 
-def _fit(obs, cams0=None):
+F_BORROW_TOL = 0.05     # a setup borrowing focal lengths may move them this fraction (a reframe could touch the zoom)
+
+
+def _fit(obs, cams0=None, f_ref=None):
+    """Bundle adjustment.  f_ref (3,): focal lengths borrowed from the session's main setup -- the same cameras,
+    so a small or moved setup only has to find where they stand, not their lenses too (one jump can't pin a focal
+    length: single-rep rolls of 17-83 deg on B015)."""
     fb = cc.focal_bounds_for_camera('sony-rx100', B.IMAGE_SIZE[0])
+    if f_ref is not None:
+        f_ref = np.asarray(f_ref, float)
+        fb = (f_ref * (1 - F_BORROW_TOL), f_ref * (1 + F_BORROW_TOL))
     if cams0 is None:
-        f0 = cc.init_focal_from_spec(fb, 3, 'wide')
+        f0 = cc.init_focal_from_spec(fb, 3, 'wide') if f_ref is None else f_ref.copy()
         base12 = float(np.linalg.norm(cc.DEFAULT_LAYOUT[1] - cc.DEFAULT_LAYOUT[0]))
         cams0 = cc.init_from_essential(obs, f0, base12, image_size=B.IMAGE_SIZE, verbose=False)
     opts = cc.BAOptions(fit_k1=False, f_bounds=fb, use_bone_prior=False, verbose=0, max_nfev=200)
     return cc.solve(cams0, obs, opts=opts, sigma_px=4.0, verbose=False)
 
 
-def calibrate_loose(reps, n_frames=SETUP_FRAMES, min_frames=MIN_FRAMES_REP):
+def calibrate_loose(reps, n_frames=SETUP_FRAMES, min_frames=MIN_FRAMES_REP, f_ref=None):
     cand = candidates_loose(reps)
     obs = cc.select_spread(cand, n_frames=n_frames, min_frames=min_frames, min_views=3)
-    cams, L, X, _, prob = _fit(obs)
+    cams, L, X, _, prob = _fit(obs, f_ref=f_ref)
     # drop 3-view points any camera disagrees with, refit from the first fit
     X3, _ = cc.triangulate(cams, obs.xy, obs.vis)
     e = cc.reprojection_per_view(cams, X3, obs.xy, obs.vis)            # (F,3,25)
@@ -94,8 +124,10 @@ def calibrate_loose(reps, n_frames=SETUP_FRAMES, min_frames=MIN_FRAMES_REP):
     n_drop = int((bad & obs.vis[:, 0]).sum())
     if n_drop:
         obs.vis = obs.vis & ~bad[:, None, :]
-        cams, L, X, _, prob = _fit(obs, cams)
-    return _finish(obs, cams, L, X, prob, rule=f'loose (dropped {n_drop} pts)')
+        cams, L, X, _, prob = _fit(obs, cams, f_ref=f_ref)
+    cal = _finish(obs, cams, L, X, prob, rule=f'loose (dropped {n_drop} pts)' + (', borrowed f' if f_ref is not None else ''))
+    cal['reps'] = reps                                   # for quality()'s fixed point set
+    return cal
 
 
 def calibrate_strict(reps):
@@ -111,8 +143,38 @@ def _finish(obs, cams, L, X, prob, rule):
                 floor_inlier_frac=float(inl.mean()), axis_miss_m=info['miss'])
 
 
+FIXED_CAP = 400          # frames per rep for the fixed point set
+
+
+def fixed_points(reps):
+    """Every confident 3-view point of these reps (conf > CONF in all 3 cameras, any speed) -- a set the choice of
+    calibration frames can't change."""
+    return candidates_loose(reps, slow_px=None, cap=FIXED_CAP)
+
+
 def quality(cal):
+    """The build's session gates for this calibration, plus the reprojection-vs-noise-floor ratio measured on a FIXED
+    point set.  The build measures the floor on the calibration's own points, so choosing cleaner calibration points
+    (slow joints) lowers the floor while the fit stays put and the ratio fails for the wrong reason (B015 setup 1:
+    1.45 -> 1.7 with identical held-out error).  Here both the fit (median reprojection per camera, worst camera)
+    and the floor (epipolar_floor) are measured on all confident 3-view points of the setup's reps."""
     q = B.setup_quality(cal)
+    q['ratio_calib_pts'] = q.pop('ratio')
+    if cal.get('reps'):
+        fx = fixed_points(cal['reps'])
+        X3, _ = cc.triangulate(cal['cams'], fx.xy, fx.vis)
+        e = cc.reprojection_per_view(cal['cams'], X3, fx.xy, fx.vis)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            per_cam = [float(np.nanmedian(e[:, c][fx.vis[:, c]])) for c in range(3)]
+        fit_fx = max(per_cam)
+        floor = B.epipolar_floor(fx)
+        q['fit_fixed_px'], q['floor_fixed_px'] = fit_fx, floor
+        q['fit_fixed_per_cam'] = [round(x, 3) for x in per_cam]
+        q['ratio'] = fit_fx / floor if floor > 0 else np.nan
+        q['ok'] = bool(q['ratio'] <= B.GATES['max_reproj_over_epipolar_fixed'] and q['roll'] <= B.GATES['max_abs_roll_deg']
+                       and q['cv'] <= B.GATES['max_long_bone_cv_pct'])
+    q['f'] = [round(float(x)) for x in cal['cams'].f]
     rp = cc.reprojection_errors(cal['cams'], cal['prob'], cal['X'])
     q['calib_median_px'] = [round(rp[c]['median'], 2) for c in range(3)]
     q['n_frames'] = int(cal['obs'].xy.shape[0])
@@ -154,8 +216,13 @@ def offsets(cams, rep):
         b, n = _med(d)
         flat = d.reshape(-1, 2); flat = flat[np.isfinite(flat).all(1)]
         scatter = float(np.median(np.linalg.norm(flat - b, axis=1))) if n >= 30 and np.isfinite(b).all() else np.nan
+        p = np.where(((xy[:, c, BODY] == 0).all(-1) | (conf[:, c, BODY] <= LOO_CONF))[..., None], np.nan,
+                     xy[:, c, BODY])
+        speed = np.full(p.shape[:2], np.nan)
+        speed[1:-1] = np.linalg.norm(p[2:] - p[:-2], axis=-1) / 2
+        ds = np.where((speed < SLOW_PX)[..., None], d, np.nan)
         edges = np.linspace(0, len(d), N_WIN + 1).astype(int)
-        wins = [_med(d[a:z], 15)[0] for a, z in zip(edges[:-1], edges[1:])]
+        wins = [_med(ds[a:z], 15)[0] for a, z in zip(edges[:-1], edges[1:])]
         out.append(dict(b=b, size=float(np.hypot(*b)) if np.isfinite(b).all() else np.nan, n=n, scatter=scatter,
                         wins=np.array(wins)))
     return out
@@ -170,6 +237,85 @@ def wander(offs):
     return w
 
 
+# ---------------------------------------------------------------- bystanders ----
+
+FEET = [11, 14, 19, 22]  # ankles, big toes: a standing person's feet stay put even while they gesture
+BYST_MIN_SEEN = 0.5      # a bystander's feet must be seen in this share of the rep
+BYST_STILL_PX = 8.0      # a bystander whose feet stay within this all rep: that camera did not move
+BYST_MOVE_PX = 15.0      # a bystander shift at least this, in step with the child's offset drift: the camera moved
+BYST_CORR = 0.6          # ... 'in step': correlation of the two window series
+
+
+def bystander_windows(rep, c, start, T):
+    """Each other person in camera c (align_cameras' tracks, not the child's): their feet's median position per
+    window, relative to their whole-rep median -- (N_WIN, 2) arrays.  A camera turning shifts everyone in it."""
+    path = os.path.join(ALIGNED_PATH or f"{B.KOREA_ROOT}/{rep['stub'][0]}/{ALIGNED}", f"{rep['stub']}.npz")
+    if not os.path.exists(path):
+        return []
+    a = np.load(path)
+    if f'tracks_xy{c + 1}' not in a:
+        return []
+    tx, ts = a[f'tracks_xy{c + 1}'], a[f'tracks_score{c + 1}']
+    child = {int(a['track'][c])}
+    if 'candidates' in a:
+        child |= {int(row[1 + c]) for row in a['candidates']}
+    out = []
+    for k in range(len(tx)):
+        if k in child or np.array_equal(tx[k], rep['raw_xy'][c]):
+            continue
+        xy, sc = tx[k][start:start + T], ts[k][start:start + T]
+        if len(xy) < T:
+            continue
+        ok = (sc[:, FEET] > 0.5) & ~(xy[:, FEET] == 0).all(-1)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            f = np.nanmean(np.where(ok[..., None], xy[:, FEET], np.nan), axis=1)
+        if np.isfinite(f).all(1).mean() < BYST_MIN_SEEN:
+            continue
+        e = np.linspace(0, T, N_WIN + 1).astype(int)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            w = np.array([np.nanmedian(f[a0:z], axis=0) for a0, z in zip(e[:-1], e[1:])])
+            out.append(w - np.nanmedian(f, axis=0))
+    return out
+
+
+def moving_cameras(rep, offs):
+    """Per camera: (moving?, how decided).  Bystanders first, the child's own offsets as the fallback.
+
+    - a bystander shifting >= BYST_MOVE_PX in step with the child's offset drift (corr >= BYST_CORR) -> moving
+    - else a bystander standing still (<= BYST_STILL_PX all rep) -> not moving, whatever the child's offsets say
+    - else (no bystander, or bystanders who moved on their own) -> the child's wander > MOVE_PX
+    """
+    _, _, start = B.rep_span(rep)
+    T = len(B.rep_span(rep)[0])
+    wand = wander(offs)
+    out = []
+    for c in range(3):
+        child = offs[c]['wins'] - offs[c]['b']
+        bys = bystander_windows(rep, c, int(start[c]), T)
+        verdict = None
+        notes = []
+        for bw in bys:
+            amp = float(np.nanmax(np.linalg.norm(bw, axis=1)))
+            m = np.isfinite(bw).all(1) & np.isfinite(child).all(1)
+            corr = np.nan
+            if m.sum() >= 4:
+                x, y = child[m].ravel(), bw[m].ravel()
+                if np.linalg.norm(x) > 0 and np.linalg.norm(y) > 0:
+                    corr = float(x @ y / (np.linalg.norm(x) * np.linalg.norm(y)))
+            notes.append(f'bystander {amp:.0f}px corr {corr:+.2f}')
+            if amp >= BYST_MOVE_PX and np.isfinite(corr) and corr >= BYST_CORR:
+                verdict = (True, 'bystander moves with the child')
+            elif amp <= BYST_STILL_PX and verdict is None:
+                verdict = (False, 'bystander still')
+        if verdict is None:
+            mv = bool(np.isfinite(wand[c]) and wand[c] > MOVE_PX)
+            verdict = (mv, f"child wander {wand[c]:.0f}px" + (' (no bystander)' if not bys else ' (bystanders moved on their own)'))
+        out.append((verdict[0], verdict[1] + ('; ' + ', '.join(notes) if notes else '')))
+    return out
+
+
 # ---------------------------------------------------------------- the walk ----
 
 def prepare(rep, cams):
@@ -179,12 +325,33 @@ def prepare(rep, cams):
     return e
 
 
-def test(rep, cal):
-    trial = dict(rep)
-    err = prepare(trial, cal['cams'])
-    offs = offsets(cal['cams'], trial)
-    worst = np.nanmax([o['size'] for o in offs]) if any(np.isfinite(o['size']) for o in offs) else np.inf
-    return worst <= AGREE_PX, worst, err, offs, trial
+def _worst(cams, r):
+    offs = offsets(cams, r)
+    s = [o['size'] for o in offs]
+    return (float(np.nanmax(s)) if np.isfinite(s).any() else np.inf), offs
+
+
+def joint_test(members, cands, cal):
+    """Can ONE set of cameras explain both the setup's reps and the candidates?
+
+    Testing a candidate against the setup's cameras extrapolates them -- and a setup seeded by one jump is too weak
+    for that (single-rep rolls of 17-83 deg on B015).  Instead calibrate members + candidates together and require
+    every camera's whole-body offset, for every rep, within AGREE_PX.  A moved camera can't be fitted by one
+    position for both groups, so one side keeps an offset.  The joint calibration becomes the setup's if they agree.
+    Returns (ok, worst offset among candidates, worst among members, first candidate's offsets, prepared
+    candidates, joint calibration).
+    """
+    trials = [dict(r) for r in cands]
+    for t in trials:
+        prepare(t, cal['cams'])
+    try:
+        cal2 = calibrate_loose(members + trials)
+    except (cc.InsufficientData, RuntimeError, ValueError):
+        return False, np.inf, np.inf, None, trials, None
+    new = [_worst(cal2['cams'], t) for t in trials]
+    old = [_worst(cal2['cams'], m)[0] for m in members]
+    wn, wo = max(w for w, _ in new), max(old)
+    return wn <= AGREE_PX and wo <= AGREE_PX, wn, wo, new[0][1], trials, cal2
 
 
 def fmt_offs(offs):
@@ -194,7 +361,7 @@ def fmt_offs(offs):
 
 def run(S, subject, verbose=True):
     t0 = time.time()
-    data = f'{B.KOREA_ROOT}/{S}/Aligned'
+    data = f'{B.KOREA_ROOT}/{S}/{ALIGNED}'
     reps = [r for r in B.load_reps(data, subject)
             if r['stub'].split('_')[2] not in B.EXCLUDE_ACTIONS_BY_SET[S]]
     reps.sort(key=lambda r: (B._action(r['stub']), int(r['stub'].split('_')[3])))
@@ -265,16 +432,16 @@ def run(S, subject, verbose=True):
                 log(f"  {r['stub']}: cannot seed (too few frames) -- skipped")
                 report['reps'][r['stub']]['walk'] = 'cannot seed'
             continue
-        ok, worst, err, offs, trial = test(r, cur['cal'])
-        log(f"  {r['stub']} vs setup {len(setups) + 1}: worst offset {worst:5.1f} px, err {err:4.1f} px  "
-            f"{fmt_offs(offs)}  -> {'agree' if ok else 'DISAGREE'}")
+        ok, wn, wo, offs, trials, cal2 = joint_test(cur['members'], [r], cur['cal'])
+        log(f"  {r['stub']} + setup {len(setups) + 1} jointly: worst offset {wn:5.1f} px (rep) / {wo:5.1f} px "
+            f"(setup's reps)  {fmt_offs(offs) if offs else ''}  -> {'agree' if ok else 'DISAGREE'}")
         if ok:
             if pending is not None:
                 cur['outliers'].append(pending['stub'])
                 report['reps'][pending['stub']]['walk'] = 'outlier (next rep agreed)'
                 log(f"    {pending['stub']} set aside as an outlier")
                 pending = None
-            add(cur, trial)
+            cur['members'].append(trials[0]); cur['cal'] = cal2
         elif pending is None:
             pending = r
         else:                                            # two in a row: the cameras moved
@@ -282,11 +449,11 @@ def run(S, subject, verbose=True):
             log(f"  -> close setup {len(setups)} ({len(cur['members'])} reps); new setup from {pending['stub']}")
             cur = new_setup(pending)
             pending = None
-            ok, worst, err, offs, trial = test(r, cur['cal'])
-            log(f"  {r['stub']} vs setup {len(setups) + 1}: worst offset {worst:5.1f} px  {fmt_offs(offs)}  "
+            ok, wn, wo, offs, trials, cal2 = joint_test(cur['members'], [r], cur['cal'])
+            log(f"  {r['stub']} + setup {len(setups) + 1} jointly: worst offset {wn:5.1f} / {wo:5.1f} px  "
                 f"-> {'agree' if ok else 'DISAGREE'}")
             if ok:
-                add(cur, trial)
+                cur['members'].append(trials[0]); cur['cal'] = cal2
             else:
                 pending = r
     close()
@@ -303,12 +470,11 @@ def run(S, subject, verbose=True):
                 acts = lambda st: {r['stub'].split('_')[2] for r in st['members']}
                 if acts(a) & acts(b):                    # same action: split by the walk on purpose
                     continue
-                w_ab = [test(r, a['cal'])[1] for r in b['members']]
-                w_ba = [test(r, b['cal'])[1] for r in a['members']]
-                log(f"  setups {i + 1}+{j + 1}: median worst offset {np.median(w_ab):.1f} / {np.median(w_ba):.1f} px")
-                if np.median(w_ab) <= AGREE_PX and np.median(w_ba) <= AGREE_PX:
-                    a['members'] += b['members']; a['outliers'] += b['outliers']
-                    a['cal'] = calibrate_loose(a['members'])
+                ok, wn, wo, _, trials, cal2 = joint_test(a['members'], b['members'], a['cal'])
+                log(f"  setups {i + 1}+{j + 1} jointly: worst offset {wn:.1f} / {wo:.1f} px")
+                if ok:
+                    a['members'] += trials; a['outliers'] += b['outliers']
+                    a['cal'] = cal2
                     setups.pop(j); merged = True
                     log(f'    merged')
                     break
@@ -374,7 +540,9 @@ def main():
     ap.add_argument('--set', default='B')
     ap.add_argument('--subject', required=True)
     ap.add_argument('--json', default=None)
+    ap.add_argument('--aligned', default=ALIGNED, help='folder under {root}/{set} with the aligned reps')
     a = ap.parse_args()
+    globals()['ALIGNED'] = a.aligned
     warnings.simplefilter('ignore', RuntimeWarning)
     rep = run(a.set, a.subject)
     if a.json:

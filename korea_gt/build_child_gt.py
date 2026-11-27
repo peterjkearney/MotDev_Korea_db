@@ -120,6 +120,9 @@ GATES = dict(
     min_calib_frames=40,           # fallback tier
     min_calib_corr=1500,
     max_reproj_over_epipolar=1.6,  # calibration reprojection vs the model-free noise floor
+    max_reproj_over_epipolar_fixed=1.6,  # the same, both measured on a FIXED point set (all confident 3-view points of
+                                         # the setup's reps; --setup-search cluster).  Higher than the calibration-point
+                                         # ratio by construction (B015 setup 1: 1.45 -> 1.60).  TO RE-DERIVE on clean sessions.
     max_abs_roll_deg=10.0,          # tripods: roll must come out near zero
     max_long_bone_cv_pct=8.0,      # depth distortion makes bones breathe
     min_floor_inlier_frac=0.6,
@@ -795,6 +798,58 @@ def find_setups(subject, reps, args):
     return setups, record
 
 
+def find_setups_cluster(subject, reps, args):
+    """--setup-search cluster: setups by clustering reps on their camera offsets (setup_cluster.py).
+
+    One whole-session calibration first (the cheap path: kept if it passes the gates and every rep agrees with it);
+    otherwise reps are grouped by their per-camera offsets, each group calibrated on its own (loose rule: slow,
+    confident 3-view points), and reps with a camera moving during them dropped.  Returns the same structure as
+    find_setups, so finish_setup and every output stay as they are.  Each calibration carries 'fixed': its fit and
+    noise floor measured on all confident 3-view points of its reps, which finish_setup uses in place of the
+    calibration-point numbers (the slow-point calibration lowers those for the wrong reason).  Dropped reps go, set
+    aside, to the setup whose cameras fit them best.
+    """
+    import setup_sequential as Q
+    import setup_cluster as SC
+    Q.ALIGNED_PATH = args.data
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)
+        rec = SC.run(subject[0], subject, verbose=False, cheap=not args.no_cheap, reps=[dict(r) for r in reps])
+    it = rec.pop('_internal')
+    groups, cals, by, dropped = it['groups'], it['cals'], it['by'], it['dropped']
+    if not groups:
+        raise cc.InsufficientData('no camera setup could be calibrated')
+    home = {s: k for k, g in enumerate(groups) for s in g}
+    for s in dropped:
+        fits = []
+        for k, c in enumerate(cals):
+            try:
+                fits.append((Q._worst(c['cams'], by[s])[0], k))
+            except Exception:
+                pass
+        home[s] = min(fits)[1] if fits else 0
+    setups = []
+    for k, (g, cal) in enumerate(zip(groups, cals)):
+        sel = [by[s] for s in by if home.get(s) == k]            # rep order
+        q = Q.quality(cal)
+        info, bad = {}, {}
+        for r in sel:
+            choice = choose_person(cal['cams'], r)
+            e0, e1 = refine_sync(cal['cams'], r)
+            info[r['stub']] = dict(lag_align=r['lag0'], err_align=e0, err_pass1=e1, lag_final=tuple(r['lag']),
+                                   err_final=e1, kept_pct=camera_check(cal['cams'], r), **choice)
+            bad[r['stub']] = [dropped[r['stub']]] if r['stub'] in dropped else []
+        cal['n_calibrations'] = rec['n_calibrations'] if k == 0 else 0
+        cal['n_sync_changed'] = sum(info[s]['lag_final'] != info[s]['lag_align'] for s in info)
+        cal['fixed'] = dict(per_cam=np.array(q['fit_fixed_per_cam']), floor=q['floor_fixed_px'])
+        setups.append(dict(cal=cal, info=info, bad=bad, reps=sel))
+    record = dict(method='cluster', path=rec['path'], whole_session=rec['whole_session'],
+                  n_calibrations=rec['n_calibrations'], dropped=dropped,
+                  assigned={i + 1: list(g) for i, g in enumerate(groups)},
+                  setups=[s['quality'] for s in rec['setups']])
+    return setups, record
+
+
 def finish_setup(subject, setup_idx, n_setups, setup, args, video_index, sess_dir, ref):
     """Triangulate one camera setup's reps, set its unit, check it, judge and save its reps.
 
@@ -808,6 +863,10 @@ def finish_setup(subject, setup_idx, n_setups, setup, args, video_index, sess_di
     reproj = cc.reprojection_errors(cams, prob, cal['X'])
     calib_med = np.array([reproj[c]['median'] for c in range(3)])
     epi = epipolar_floor(obs)
+    ratio_gate = GATES['max_reproj_over_epipolar']
+    if cal.get('fixed'):                 # --setup-search cluster: fit and floor on the setup's fixed point set
+        calib_med, epi = cal['fixed']['per_cam'], cal['fixed']['floor']
+        ratio_gate = GATES['max_reproj_over_epipolar_fixed']
     bstats = cc.bone_stats(prob, cal['X'], cal['L'])
     long_cv = float(np.median([bstats[k]['cv_pct'] for k in LONG_BONES if k in bstats]))
 
@@ -882,9 +941,9 @@ def finish_setup(subject, setup_idx, n_setups, setup, args, video_index, sess_di
     ratio = float(calib_med.max() / epi) if np.isfinite(epi) and epi > 0 else float('nan')
     roll = float(np.abs(floor['roll_deg']).max())
     checks = [
-        (ratio <= GATES['max_reproj_over_epipolar'],
+        (ratio <= ratio_gate,
          f'reprojection {calib_med.max():.2f}px is {ratio:.2f}x the epipolar floor '
-         f'{epi:.2f}px (max {GATES["max_reproj_over_epipolar"]})'),
+         f'{epi:.2f}px (max {ratio_gate})'),
         (roll <= GATES['max_abs_roll_deg'],
          f'camera roll {roll:.1f} deg (max {GATES["max_abs_roll_deg"]})'),
         (long_cv <= GATES['max_long_bone_cv_pct'],
@@ -1117,7 +1176,7 @@ def process_session(subject, args, video_index):
         summary.update(status='skipped', reasons=['no synced reps'])
         return finish()
     try:
-        setups, search = find_setups(subject, loaded, args)
+        setups, search = (find_setups_cluster if args.setup_search == 'cluster' else find_setups)(subject, loaded, args)
     except cc.InsufficientData as e:
         summary.update(status='skipped', reasons=[str(e).split('.')[0]])
         return finish()
@@ -1262,6 +1321,12 @@ def main():
                     help='long-bone sum / stature, for setups with no standing frames; default BONE_SUM_RATIO_BY_SET')
     ap.add_argument('--no-bone-sum', action='store_true',
                     help='old behaviour: a setup whose stature cannot be measured fails the stature gate')
+    ap.add_argument('--setup-search', choices=['actions', 'cluster'], default='actions',
+                    help="how camera setups are found: 'actions' = whole session, else per action and merged (the "
+                         "GT3D build); 'cluster' = reps clustered on camera offsets, slow-point calibration, moving-"
+                         "camera check, fixed-point-set gates (setup_cluster.py; GT3D_v5)")
+    ap.add_argument('--no-cheap', action='store_true',
+                    help='with --setup-search cluster: always cluster, even when one whole-session calibration fits')
     ap.add_argument('--save-all', action='store_true',
                     help='also save reps that fail the gates (flagged unusable)')
     ap.add_argument('--overwrite', action='store_true')
@@ -1277,6 +1342,7 @@ def main():
         args.exclude_actions = EXCLUDE_ACTIONS_BY_SET[args.set]
     else:
         args.exclude_actions = () if args.exclude_actions == 'none' else tuple(args.exclude_actions.split(','))
+    print(f'setup search: {args.setup_search}', flush=True)
     print(f'set {args.set}: scaling to stature {args.cohort_stature:.3f} m; '
           f'excluding GMS actions {",".join(args.exclude_actions) or "none"}; data {args.data}', flush=True)
 

@@ -22,6 +22,7 @@ import build_child_gt as B   # noqa: E402
 import camcal as cc          # noqa: E402
 
 ROOT = B.KOREA_ROOT
+ALIGNED, GT3D = 'Aligned', 'GT3D'               # folders under {ROOT}/{set}; viewer.py --aligned/--gt3d (GT3D_v5: Aligned_v5)
 LONG = list(B.LONG_BONES)                       # torso, upperarm, forearm, thigh, shank -- the session CV gate
 # camcal.BONES order, with a side label for the panel
 BONES = [(a, b, k, 'L' if a in (5, 6, 12, 13) or b in (5, 12) else ('R' if k != 'torso' else '-'))
@@ -35,7 +36,7 @@ def _session(S, subj):
     with _lock:
         if key in _sess:
             return _sess[key]
-    G = f'{ROOT}/{S}/GT3D/{subj}'
+    G = f'{ROOT}/{S}/{GT3D}/{subj}'
     summ = json.load(open(f'{G}/session_summary.json')) if os.path.exists(f'{G}/session_summary.json') else None
     cams = dict(np.load(f'{G}/session_cameras.npz')) if os.path.exists(f'{G}/session_cameras.npz') else None
     with _lock:
@@ -48,7 +49,7 @@ def _loaded(S, subj):
     with _lock:
         if key in _reps:
             return _reps[key]
-    reps = {r['stub']: r for r in B.load_reps(f'{ROOT}/{S}/Aligned', subj)}
+    reps = {r['stub']: r for r in B.load_reps(f'{ROOT}/{S}/{ALIGNED}', subj)}
     with _lock:
         _reps[key] = reps
     return reps
@@ -236,7 +237,7 @@ if __name__ == '__main__':          # quick check against a saved GT3D rep
     S, stub = sys.argv[1], sys.argv[2]
     loc, why = _locate(S, stub)
     cs, X, ok, start, lag, *_ = _triangulate(S, stub, loc)
-    p = f'{ROOT}/{S}/GT3D/{stub.split("_")[0]}/{stub}.npz'
+    p = f'{ROOT}/{S}/{GT3D}/{stub.split("_")[0]}/{stub}.npz'
     if os.path.exists(p):
         z = np.load(p)
         Xs, oks = z['X_body25_cam'][0], z['valid_body25']

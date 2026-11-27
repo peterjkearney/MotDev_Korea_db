@@ -14,7 +14,8 @@ different moment.  Per rep:
      correlates too).  Before this, reps with switches failed the sync 73% of the time vs 6%,
   1. reduce each camera's track to a 1-D motion signal,
   2. find the best offset for every camera pair (1-2, 1-3, 2-3) by masked
-     cross-correlation, within +-max_lag frames,
+     cross-correlation, within +-max_lag frames, scoring only offsets where both signals
+     overlap by min(60, 80% of the shortest camera's frames) frames, at least 30,
   3. accept the rep only if every pair correlates (>= min_corr) and the three
      offsets agree: lag23 must equal lag13 - lag12 to within max_mismatch frames,
   4. trim every camera to the common span and save it.
@@ -63,7 +64,17 @@ KOREA_ROOT = os.environ.get('KOREA_ROOT', '/Volumes/Sandisk_SSD/MotorDevelopment
 
 SYNC = dict(
     conf_thresh=0.3,      # a joint counts in the signal above this confidence
-    min_overlap=60,       # frames both signals must have valid to compare an offset
+    min_overlap=60,       # frames both signals must have valid to compare an offset (the cap; see below)
+    # Short reps: the required overlap is min(min_overlap, min_overlap_frac x the shortest camera's frames), never
+    # below min_overlap_floor (= build_child_gt's min_usable_frames).  60 came untested from the original notebook
+    # and rejected every rep under 60 frames ('too short': C 556 reps, many jumps) and reps where the child leaves one
+    # camera early (C224_GMS_3_2: child in cam3 for 57 of 67 frames -> a still bystander's track was the only one
+    # long enough, corr 0.29).  A flat lower minimum is worse: at 30, short overlaps at extreme offsets correlate by
+    # chance and moved 88 synced reps to absurd lags (A077_GMS_4_2 (0,0) -> (0,-34)).  Relative, reps >= 75 frames
+    # keep 60 exactly; measured 2026-11-27 over A/B/C: +681 synced reps (corr >= 0.8 on the weakest pair for 550),
+    # 25 synced reps change (23 by 1-2 frames), 1 lost.  --min-overlap-frac 0 restores the fixed 60.
+    min_overlap_frac=0.8,
+    min_overlap_floor=30,
     min_corr=0.3,         # every camera pair must correlate at least this well
     max_mismatch=1,       # frames: lag23 vs lag13 - lag12
 )
@@ -118,8 +129,19 @@ def normalise(sig, valid):
 # Offsets
 # --------------------------------------------------------------------------
 
-def masked_xcorr(a, b, va, vb, max_lag, min_overlap=SYNC['min_overlap']):
-    """[(lag, pearson r)]; positive lag => a is delayed relative to b (a[i+lag] matches b[i])."""
+def rep_min_overlap(lengths):
+    """Overlap a rep's offsets need, from its cameras' frame counts (SYNC: cap, fraction, floor)."""
+    if SYNC['min_overlap_frac'] <= 0:
+        return SYNC['min_overlap']
+    return max(SYNC['min_overlap_floor'],
+               min(SYNC['min_overlap'], int(np.ceil(SYNC['min_overlap_frac'] * min(lengths)))))
+
+
+def masked_xcorr(a, b, va, vb, max_lag, min_overlap=None):
+    """[(lag, pearson r)]; positive lag => a is delayed relative to b (a[i+lag] matches b[i]).
+    min_overlap None -> SYNC['min_overlap'], read at call time."""
+    if min_overlap is None:
+        min_overlap = SYNC['min_overlap']
     na, nb = len(a), len(b)
     out = []
     for lag in range(-max_lag, max_lag + 1):
@@ -138,12 +160,12 @@ def masked_xcorr(a, b, va, vb, max_lag, min_overlap=SYNC['min_overlap']):
     return out
 
 
-def find_offsets(xys, confs, signal='vertical', max_lag=45):
+def find_offsets(xys, confs, signal='vertical', max_lag=45, min_overlap=None):
     """Pairwise best offsets and the accept / reject decision for one rep."""
     sigs = [normalise(*SIGNALS[signal](x, c)) for x, c in zip(xys, confs)]
     out, best = {}, {}
     for key, (a, b) in {'12': (0, 1), '13': (0, 2), '23': (1, 2)}.items():
-        res = masked_xcorr(sigs[a][0], sigs[b][0], sigs[a][1], sigs[b][1], max_lag)
+        res = masked_xcorr(sigs[a][0], sigs[b][0], sigs[a][1], sigs[b][1], max_lag, min_overlap)
         best[key] = max(res, key=lambda r: r[1]) if res else None
         out[f'lag{key}'] = best[key][0] if best[key] else np.nan
         out[f'corr{key}'] = best[key][1] if best[key] else np.nan
@@ -204,6 +226,15 @@ TRACK = dict(
     min_frames=30,        # a track this short is never the child's
     max_tracks=3,         # longest tracks kept as candidates, per camera
     ambiguous_margin=0.15,  # a runner-up combination this close to the best is a second candidate
+    # Second join pass, for one person whose track split at a fast move (a jump's take-off, a catch): more than
+    # max_step_px between frames, so the first join refused it (B011_GMS_3_1 cam 1: one person every frame but
+    # one, split at frame 111/112).  Joined only where nobody else is around the junction, so it can't splice two
+    # people.  Set False to reproduce the earlier behaviour.
+    join_jumps=True,
+    jump_max_px=300.0,    # unpredicted jump allowed at the junction (mean joint distance)
+    jump_clear=10,        # frames either side of the junction that must show no third track ...
+    jump_other_min=10,    # ... of at least this many frames (a one-frame stray detection is not a competitor)
+    jump_size_ratio=1.5,  # the two pieces' median body heights within this factor of each other
 )
 
 
@@ -275,6 +306,9 @@ def build_tracks(frames):
         else:
             merged.append(tr)
 
+    if TRACK['join_jumps']:
+        merged = join_jumps(merged)
+
     out = []
     for tr in sorted(merged, key=lambda tr: -len(tr['rows'])):
         xy, sc = np.zeros((T, 25, 2)), np.zeros((T, 25))
@@ -282,6 +316,64 @@ def build_tracks(frames):
             xy[t], sc[t] = x, s
         out.append((xy, sc))
     return out
+
+
+def _height(tr):
+    h = []
+    for x, s in tr['rows'].values():
+        m = _seen(x, s)
+        if m.sum() >= 4:
+            h.append(np.ptp(x[m][:, 1]))
+    return float(np.median(h)) if h else np.nan
+
+
+def _predicted(tr, gap):
+    """The track's last detection carried forward by its last velocity (per joint), `gap` frames on."""
+    t1 = tr['last']
+    x1, s1 = tr['rows'][t1]
+    prev = [t for t in tr['rows'] if t1 - 3 <= t < t1]
+    if not prev:
+        return x1, s1
+    t0 = max(prev)
+    x0, s0 = tr['rows'][t0]
+    v = np.where((_seen(x0, s0) & _seen(x1, s1))[:, None], (x1 - x0) / (t1 - t0), 0.0)
+    return x1 + v * gap, s1
+
+
+def join_jumps(tracks):
+    """Join a track that ends to one that starts within merge_gap frames when the first join refused it only for
+    distance, and nothing else could be confused with it: no third track (of jump_other_min+ frames) present within
+    jump_clear frames of the junction, bodies of compatible size, and the start either where the first track was heading (its last velocity
+    carried forward) or within jump_max_px.  Repeats until nothing joins."""
+    tracks = sorted(tracks, key=lambda tr: tr['first'])
+    while True:
+        best = None
+        for i, a in enumerate(tracks):
+            for j, b in enumerate(tracks):
+                gap = b['first'] - a['last']
+                if i == j or not 0 < gap <= TRACK['merge_gap']:
+                    continue
+                lo, hi = a['last'] - TRACK['jump_clear'], b['first'] + TRACK['jump_clear']
+                if any(k not in (i, j) and len(tr['rows']) >= TRACK['jump_other_min']
+                       and any(lo <= t <= hi for t in tr['rows']) for k, tr in enumerate(tracks)):
+                    continue
+                ha, hb = _height(a), _height(b)
+                if not (np.isfinite(ha) and np.isfinite(hb) and max(ha, hb) <= TRACK['jump_size_ratio'] * min(ha, hb)):
+                    continue
+                first = b['rows'][b['first']]
+                d_pred = _distance(_predicted(a, gap), first)
+                d_raw = _distance(a['rows'][a['last']], first)
+                gate = TRACK['max_step_px'] + TRACK['step_per_gap_px'] * (gap - 1)
+                if d_pred <= gate or d_raw <= TRACK['jump_max_px']:
+                    if best is None or gap < best[0]:
+                        best = (gap, i, j)
+        if best is None:
+            return tracks
+        _, i, j = best
+        a, b = tracks[i], tracks[j]
+        a['rows'].update(b['rows'])
+        a['last'] = b['last']
+        tracks.pop(j)
 
 
 def first_listed(frames):
@@ -303,7 +395,7 @@ def candidate_tracks(frames):
     return tr[:TRACK['max_tracks']], max(len(d) for d in frames)
 
 
-def choose_people(people, signal, max_lag):
+def choose_people(people, signal, max_lag, min_overlap=None):
     """The combination of one track per camera whose movement agrees best across cameras.
 
     Every combination is scored by the sum of its three pairwise correlations; the best
@@ -321,7 +413,7 @@ def choose_people(people, signal, max_lag):
     for combo in itertools.product(*[range(len(c)) for c in cands]):
         xys = [cands[c][i][0] for c, i in enumerate(combo)]
         scs = [cands[c][i][1] for c, i in enumerate(combo)]
-        off = find_offsets(xys, scs, signal, max_lag)
+        off = find_offsets(xys, scs, signal, max_lag, min_overlap)
         score = np.nansum([off['corr12'], off['corr13'], off['corr23']])
         results.append((off['status'] == 'OK', score, combo, off))
     results.sort(key=lambda r: (r[0], r[1]), reverse=True)
@@ -333,6 +425,8 @@ def choose_people(people, signal, max_lag):
 
 def process(task):
     stub, args = task
+    TRACK['join_jumps'] = not getattr(args, 'no_join_jumps', False)   # workers may be spawned: set it here
+    SYNC['min_overlap_frac'] = getattr(args, 'min_overlap_frac', SYNC['min_overlap_frac'])
     row = dict(stub=stub)
     try:
         people, fidx = load_rep(args.json_dir, stub)
@@ -342,17 +436,19 @@ def process(task):
     except (IndexError, KeyError, ValueError) as e:
         row.update(status='unreadable skeleton', detail=repr(e)[:80])
         return row
-    if min(len(f) for f in people) < SYNC['min_overlap']:
+    mo = rep_min_overlap([len(f) for f in people])
+    row['min_overlap'] = mo
+    if min(len(f) for f in people) < mo:
         row.update(status='too short', detail=f'{min(len(f) for f in people)} frames in the shortest camera')
         return row
     try:
         if args.people == 'first':
             cands = [[first_listed(f)] for f in people]
             combo, maxp = (0, 0, 0), [max(len(d) for d in f) for f in people]
-            off = find_offsets([c[0][0] for c in cands], [c[0][1] for c in cands], args.signal, args.max_lag)
+            off = find_offsets([c[0][0] for c in cands], [c[0][1] for c in cands], args.signal, args.max_lag, mo)
             options = [(0.0, combo, off)]
         else:
-            chosen = choose_people(people, args.signal, args.max_lag)
+            chosen = choose_people(people, args.signal, args.max_lag, mo)
             if chosen is None:
                 row.update(status='no person track', detail='a camera has no track of 30+ frames')
                 return row
@@ -371,6 +467,12 @@ def process(task):
     l12, l13 = int(row['lag12']), int(row['lag13'])
     start, T = span([len(x) for x in xys], l12, l13)
     row['frames'] = T
+    # frames in the synced span where all three cameras' signals are valid: below 60 = synced on a short overlap
+    # (allowed for short reps since the relative min_overlap) -> worth a look in the viewer
+    valid = [SIGNALS[args.signal](x, s)[1] for x, s in zip(xys, scs)]      # one shorter than the track (a diff)
+    vs = [valid[c][start[c]:start[c] + T] for c in range(3)]
+    n = min(len(v) for v in vs)
+    row['sync_overlap'] = int(np.logical_and.reduce([v[:n] for v in vs]).sum())
     out = dict(lag12=l12, lag13=l13, start=start, signal=np.array(args.signal), people=np.array(args.people),
                track=np.array(combo))
     for c in range(3):
@@ -402,7 +504,14 @@ def main():
     ap.add_argument('--max-lag', type=int, default=45, help='largest offset searched, frames (the original used 30)')
     ap.add_argument('--subjects', default=None, help='comma-separated; default all')
     ap.add_argument('--workers', type=int, default=4)
+    ap.add_argument('--min-overlap-frac', type=float, default=SYNC['min_overlap_frac'],
+                    help='short reps need min(60, this x the shortest camera\'s frames) overlapping frames, at least '
+                         f"{SYNC['min_overlap_floor']}; 0 = a fixed 60 for every rep (the earlier behaviour)")
+    ap.add_argument('--no-join-jumps', action='store_true',
+                    help='skip the second join pass (tracks split at a fast move stay split): the earlier behaviour')
     args = ap.parse_args()
+    TRACK['join_jumps'] = not args.no_join_jumps
+    SYNC['min_overlap_frac'] = args.min_overlap_frac
     args.json_dir = args.json_dir or os.path.join(args.root, args.set)
     args.out = args.out or os.path.join(args.root, args.set, 'Aligned')
     os.makedirs(args.out, exist_ok=True)
