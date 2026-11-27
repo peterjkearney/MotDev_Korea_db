@@ -116,6 +116,8 @@ kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 3
           <span><i style="background:var(--ok)"></i>within 12% of setup median</span>
           <span><i style="background:var(--warn)"></i>12–25% (rep-gate size)</span>
           <span><i style="background:var(--bad)"></i>&gt;25% (joint gate drops both ends)</span>
+          <span>joints: ● 3 cameras agree · ○ only 2 cameras · <span style="color:#f0d000">●</span> worst residual &gt; 10 px ·
+            <span style="color:#ff4d4d">✕</span> (on a video) this camera disagreed and was dropped</span>
           <span>side view: floor level, looking across camera 1's line of sight — depth errors show as limbs leaning toward / away from camera 1</span>
         </div>
       </div>
@@ -356,8 +358,9 @@ function fitCanvas(cv) {
   if (cv.width !== Math.round(w * r) || cv.height !== Math.round(h * r)) { cv.width = Math.round(w * r); cv.height = Math.round(h * r); }
   const g = cv.getContext('2d'); g.setTransform(r, 0, 0, r, 0, 0); g.clearRect(0, 0, w, h); return [g, w, h];
 }
-function drawBones(g, P, D, map, lw) {
-  // P: 25 x [a,b] (null where missing), D: per-bone deviation, map: [a,b] -> canvas xy
+function drawBones(g, P, D, map, lw, row, cam) {
+  // P: 25 x [a,b] (null where missing), D: per-bone deviation, map: [a,b] -> canvas xy,
+  // row: data row (for camera agreement), cam: 0-2 for a video overlay, null for the side view
   skel.bones.forEach(([a, b, k], j) => {
     if (!P[a] || !P[b] || P[a][0] === null || P[b][0] === null) return;
     const col = devCol(D[j]); if (!col) return;
@@ -365,9 +368,21 @@ function drawBones(g, P, D, map, lw) {
     g.strokeStyle = col; g.lineWidth = skel.long_bones.includes(k) ? lw : lw * 0.6;
     g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke();
   });
-  g.fillStyle = '#ffffffcc';
-  P.forEach((p, i) => { if (!p || p[0] === null || i > 18) return; const [x, y] = map(p);
-    g.beginPath(); g.arc(x, y, FACE.includes(i) ? lw * 0.45 : lw * 0.6, 0, 7); g.fill(); });
+  // joints by camera agreement: filled = 3 views, hollow = 2 views, yellow = worst residual above the flag,
+  // red x (video overlay only) = THIS camera detected the joint but was dropped for disagreeing with the other two
+  const V = skel.views[row], Rr = skel.resid[row], CS = skel.cam_state[row];
+  P.forEach((p, i) => {
+    if (!p || p[0] === null || i > 18) return;
+    const [x, y] = map(p), r = FACE.includes(i) ? lw * 0.45 : lw * 0.7;
+    const hi = Rr[i] !== null && Rr[i] > skel.high_resid_px;
+    g.beginPath(); g.arc(x, y, r, 0, 7);
+    if (V[i] >= 3) { g.fillStyle = hi ? '#f0d000' : '#ffffffdd'; g.fill(); }
+    else { g.strokeStyle = hi ? '#f0d000' : '#ffffffdd'; g.lineWidth = Math.max(1, lw * 0.3); g.stroke(); }
+    if (cam !== null && CS[i][cam] === 2) {
+      const s = r * 1.8; g.strokeStyle = '#ff4d4d'; g.lineWidth = Math.max(1.5, lw * 0.45);
+      g.beginPath(); g.moveTo(x - s, y - s); g.lineTo(x + s, y + s); g.moveTo(x + s, y - s); g.lineTo(x - s, y + s); g.stroke();
+    }
+  });
 }
 function drawSkel() {
   const on = $('ovOn').checked && skel && skel.available;
@@ -377,7 +392,7 @@ function drawSkel() {
     const row = shownFrame(c) - skel.start[c];
     if (row < 0 || row >= skel.T) continue;
     g.lineCap = 'round';
-    drawBones(g, skel.proj[c][row], skel.dev[row], p => [p[0] * w, p[1] * h], Math.max(2, w / 220));
+    drawBones(g, skel.proj[c][row], skel.dev[row], p => [p[0] * w, p[1] * h], Math.max(2, w / 220), row, c);
   }
   drawSide();
   boneFrame();
@@ -415,7 +430,7 @@ function drawSide() {
   const row = Math.floor(f) - skel.start[0];          // camera 1's frame is the master clock
   if (row < 0 || row >= skel.T) { g.textAlign = 'center'; g.fillText('no data at this frame', w / 2, h / 2); return; }
   g.lineCap = 'round';
-  drawBones(g, skel.side[row], skel.dev[row], map, 4);
+  drawBones(g, skel.side[row], skel.dev[row], map, 4, row, null);
 }
 const pct = (d, sign = true) => d === null || d === undefined ? '–' : (sign && d > 0 ? '+' : '') + (100 * d).toFixed(0) + '%';
 function boneFrame() {
@@ -427,6 +442,22 @@ function boneFrame() {
   el.innerHTML = keys.map(k => `<tr class="${skel.long_bones.includes(k) ? '' : 'short'}"><td>${k}</td>` +
     (k === 'torso' ? cell(at(k, '-')) + '<td></td>' : cell(at(k, 'L')) + cell(at(k, 'R'))) +
     cell(skel.rep_dev[k]) + '</tr>').join('');
+  // camera agreement for this frame's body joints
+  const ag = document.getElementById('agreeRow'); if (!ag) return;
+  if (row < 0 || row >= skel.T) { ag.innerHTML = ''; return; }
+  const JN = { 1: 'neck', 2: 'RSh', 3: 'RElb', 4: 'RWr', 5: 'LSh', 6: 'LElb', 7: 'LWr', 8: 'midhip', 9: 'RHip', 10: 'RKnee',
+               11: 'RAnk', 12: 'LHip', 13: 'LKnee', 14: 'LAnk' };
+  const two = [], hiR = [];
+  for (const i in JN) {
+    const v = skel.views[row][i], cs = skel.cam_state[row][i], r = skel.resid[row][i];
+    if (!v) continue;
+    if (v === 2) { const c = cs.findIndex(s => s !== 1);
+      const why = { 2: '<span class="c-bad">dropped: disagreed</span>', 3: `low confidence (≤ ${skel.conf_thresh})`,
+                    0: '<span class="c-warn">no point in its synced track</span>' }[cs[c]];
+      two.push(`${JN[i]} <span style="color:var(--dim)">(cam ${c + 1} ${why})</span>`); }
+    else if (r !== null && r > skel.high_resid_px) hiR.push(`${JN[i]} ${r.toFixed(0)}px`);
+  }
+  ag.innerHTML = `<b>2 views:</b> ${two.join(', ') || 'none'}` + (hiR.length ? ` · <b>3 views, residual &gt; ${skel.high_resid_px}px:</b> ${hiR.join(', ')}` : '');
 }
 function bonePanel() {
   const P = $('bonePanel');
@@ -436,7 +467,8 @@ function bonePanel() {
   let h = `<div class="sub">Length vs the setup's median bone (setup ${skel.setup}). The rep gate fails a rep whose median
     long bone (bold rows) is more than ${100 * g}% off; the joint gate drops a bone's joints in any frame it is more than
     ${100 * skel.joint_bone_dev_gate}% off.</div>
-    <table class="bt"><tr><th>bone</th><th>this frame L</th><th>R</th><th>rep median</th></tr><tbody id="boneFrameRow"></tbody></table>`;
+    <table class="bt"><tr><th>bone</th><th>this frame L</th><th>R</th><th>rep median</th></tr><tbody id="boneFrameRow"></tbody></table>
+    <div class="sub" id="agreeRow" style="margin-top:8px"></div>`;
   if (!sstats) h += '<div class="sub" style="margin-top:10px">computing the setup\'s bone CVs (re-triangulating every rep in the setup)…</div>';
   else if (!sstats.available) h += `<div class="sub">${esc(sstats.why)}</div>`;
   else {

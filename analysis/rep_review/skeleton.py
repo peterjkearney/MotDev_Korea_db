@@ -94,7 +94,19 @@ def _triangulate(S, stub, loc):
     vis = (conf > B.GATES['conf_thresh']) & ~((xy[..., 0] == 0) & (xy[..., 1] == 0))
     cs = _camset(cams, s)
     X, ok, used, err = cc.triangulate_robust(cs, xy, vis, B.GATES['reproj_thresh_px'])
-    return cs, X, ok, start, rep['lag']
+    # used (T,3,25) views kept; err (T,3,25) px residual (NaN unused); vis (T,3,25) detected above the conf threshold
+    return cs, X, ok, start, rep['lag'], used, err, vis, conf, xy
+
+
+# Worst residual above which a 3-view joint is flagged.  3-view joints in set C: median 6.0 px, p75 8.7, p90 11.6
+# (view_agreement.py, 2026-11-26); the triangulation's own cut is 15 px.
+HIGH_RESID_PX = 10.0
+
+
+def _nanmax(a, axis):
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)
+        return np.nanmax(a, axis=axis)
 
 
 def _devs(X, ok, med):
@@ -118,7 +130,7 @@ def rep_skeleton(S, stub):
     if loc is None:
         return {'available': False, 'why': why}
     summ, st, rec, cams, s = loc
-    cs, X, ok, start, lag = _triangulate(S, stub, loc)
+    cs, X, ok, start, lag, used, err, vis, conf, xy_ = _triangulate(S, stub, loc)
     T = len(X)
     med = st['session_bone_median']
     # reprojection into each camera, as a fraction of the 1920x1080 image (the videos are scaled renders of it)
@@ -157,6 +169,19 @@ def rep_skeleton(S, stub):
         'rep_dev': rep_gate,
         'proj': _jsonable(P2, 4), 'side': _jsonable(side, 3), 'cam1_depth': cam1_depth,
         'dev': _jsonable(dev, 3),
+        # camera agreement per joint: views the triangulation kept, and the worst reprojection residual among them (px,
+        # 1080p).  3 views agreeing within a few px = position checked from three directions; 2 views = no redundancy
+        # against an error along the line joining those two cameras.
+        'views': np.where(ok, used.sum(axis=1), 0).astype(int).tolist(),
+        'resid': _jsonable(np.where(ok, _nanmax(err, axis=1), np.nan), 1),
+        'high_resid_px': HIGH_RESID_PX,
+        # per joint, per camera: 1 = used, 2 = dropped (confident but disagreed with the other two by > 15 px),
+        # 3 = low confidence (OpenPose gave a point, conf <= the 0.5 threshold -- the stick-figure render still draws
+        # it), 0 = no point in this camera's synced track (OpenPose missed it, or the person track lost the child)
+        # -- only for triangulated joints, else all 0
+        'cam_state': np.where(ok[:, None, :], np.where(used, 1, np.where(vis, 2, np.where(
+            (conf > 0) & ~((xy_[..., 0] == 0) & (xy_[..., 1] == 0)), 3, 0))), 0).transpose(0, 2, 1).astype(int).tolist(),
+        'conf_thresh': B.GATES['conf_thresh'],
     }
 
 
@@ -176,7 +201,7 @@ def setup_bone_stats(S, stub):
         l2, _ = _locate(S, sb)
         if l2 is None:
             continue
-        _, X, ok, _, _ = _triangulate(S, sb, l2)
+        _, X, ok, *_ = _triangulate(S, sb, l2)
         for a, b, k, sd in BONES:
             m = ok[:, a] & ok[:, b]
             lens[(k, sd)].append(np.linalg.norm(X[m, a] - X[m, b], axis=1))
@@ -210,7 +235,7 @@ def setup_bone_stats(S, stub):
 if __name__ == '__main__':          # quick check against a saved GT3D rep
     S, stub = sys.argv[1], sys.argv[2]
     loc, why = _locate(S, stub)
-    cs, X, ok, start, lag = _triangulate(S, stub, loc)
+    cs, X, ok, start, lag, *_ = _triangulate(S, stub, loc)
     p = f'{ROOT}/{S}/GT3D/{stub.split("_")[0]}/{stub}.npz'
     if os.path.exists(p):
         z = np.load(p)

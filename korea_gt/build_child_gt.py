@@ -104,6 +104,13 @@ COHORT_STATURE_BY_SET = {'A': 0.894, 'B': 1.006, 'C': 1.103}
 # still in Aligned/ (align_cameras.py keeps them); --exclude-actions overrides ('none' keeps everything).
 EXCLUDE_ACTIONS_BY_SET = {'A': ('1', '2'), 'B': (), 'C': ()}
 CROWN_K = 0.9                      # crown above ear level, x ear-to-ear width
+# Fallback unit when stature can't be measured (fewer than min_upright_frames upright frames) and no earlier camera
+# setup of the same child exists to borrow from: the sum of the five long-bone medians (torso, upper arm, forearm,
+# thigh, shank -- OpenPose keypoint spacings, both sides pooled) is this fraction of stature.  Measured 2026-11-26 on
+# the usable stature-scaled setups (A 56, B 75, C 80): CV between children 1.8 / 1.5 / 1.8% (p5-p95 about +-3%),
+# lower than torso+thigh+shank (2.0 / 1.8 / 1.9%).  Not an identity -- children's large heads roughly cancel the
+# arms; the code's adult table gives ~1.12 -- so it is set-specific.  --bone-sum-ratio overrides.
+BONE_SUM_RATIO_BY_SET = {'A': 0.997, 'B': 0.999, 'C': 1.027}
 
 GATES = dict(
     # session -- calibration data (enforced by camcal.select_spread)
@@ -145,6 +152,10 @@ GATES = dict(
     min_usable_frames=30,          # one second at the dataset's 30 fps
     min_usable_frac=0.25,
     max_rep_reproj_over_session=1.5,   # catches a camera bumped mid-session
+    rep_reproj_floor_px=5.5,           # ...but a rep whose worst camera is this good passes anyway: a calibration fitted
+                                       # on few, clustered frames has a low in-sample median (B015 cam2 2.63 px from 80
+                                       # action-2 frames) and failed good reps at 4-5 px.  5.5 = usable reps' worst-
+                                       # camera p95 (B 5.51, C 5.58); no camera-shift-flagged B rep gets in below 6.
     max_rep_bone_dev=0.12,             # catches a different person / bad tracking
 )
 
@@ -843,12 +854,22 @@ def finish_setup(subject, setup_idx, n_setups, setup, args, video_index, sess_di
                   if own.get(b) and np.isfinite(own[b]) and ref['sess_bones'].get(b)]
         if ratios:
             s, scale_from = float(np.median(ratios)), 'bones of setup 1'
+    if args.scale == 'stature' and scale_from == 'none' and getattr(args, 'bone_sum_ratio', None):
+        # No standing frames and nothing of this child's to borrow: set the unit from the long bones, whose sum is a
+        # stable fraction of stature within an age set (BONE_SUM_RATIO_BY_SET).
+        own = {b: float(np.nanmedian(v)) for b, v in bone_lengths(allX, allok).items()}
+        total = sum(own.get(b, np.nan) for b in LONG_BONES)
+        if np.isfinite(total) and total > 0:
+            s, scale_from = args.cohort_stature * args.bone_sum_ratio / total, 'long-bone sum'
     cams = scaled(cams, s)
     offset = cal['offset'] * s
     for r in reps:
         r['X'] = r['X'] * s
         r['X_loo'] = r['X_loo'] * s
-    stature = ref['stature'] if scale_from == 'bones of setup 1' else st['stature'] * s
+    # The stature the pipeline is fed must be in the reconstruction's own units: measured, borrowed from setup 1, or
+    # (long-bone sum) the cohort value the unit was chosen to produce.
+    stature = {'bones of setup 1': ref['stature'] if ref else np.nan,
+               'long-bone sum': args.cohort_stature}.get(scale_from, st['stature'] * s)
     floor = cc.gravity_frame(cams, cal['normal'], offset)
     Rw, org = floor['R_world_to_floor'], floor['origin']
 
@@ -870,7 +891,7 @@ def finish_setup(subject, setup_idx, n_setups, setup, args, video_index, sess_di
          f'long-bone CV {long_cv:.1f}% (max {GATES["max_long_bone_cv_pct"]})'),
         (cal['floor_inlier_frac'] >= GATES['min_floor_inlier_frac'],
          f'floor inliers {cal["floor_inlier_frac"]:.2f} (min {GATES["min_floor_inlier_frac"]})'),
-        (np.isfinite(st['stature']) or scale_from == 'bones of setup 1',
+        (np.isfinite(st['stature']) or scale_from in ('bones of setup 1', 'long-bone sum'),
          f'stature unmeasurable: {st["n_upright"]} upright frames '
          f'(need {GATES["min_upright_frames"]})'),
     ]
@@ -949,6 +970,7 @@ def finish_setup(subject, setup_idx, n_setups, setup, args, video_index, sess_di
 
         # rep gates
         rep_ratio = float(np.nanmax(rep_med / calib_med)) if np.isfinite(rep_med).any() else float('inf')
+        rep_worst_px = float(np.nanmax(rep_med)) if np.isfinite(rep_med).any() else float('inf')
         devs = [abs(rep_bone[k] / sess_bones[k] - 1) for k in LONG_BONES
                 if np.isfinite(rep_bone.get(k, np.nan))]
         rep_dev = float(max(devs)) if devs else float('inf')
@@ -971,9 +993,10 @@ def finish_setup(subject, setup_idx, n_setups, setup, args, video_index, sess_di
              f'{n_ok} usable frames (min {GATES["min_usable_frames"]})'),
             (n_ok / max(T, 1) >= GATES['min_usable_frac'],
              f'usable fraction {n_ok / max(T, 1):.2f} (min {GATES["min_usable_frac"]})'),
-            (rep_ratio <= GATES['max_rep_reproj_over_session'],
+            (rep_ratio <= GATES['max_rep_reproj_over_session'] or rep_worst_px <= GATES['rep_reproj_floor_px'],
              f'reprojection {rep_ratio:.2f}x the session calibration '
-             f'(max {GATES["max_rep_reproj_over_session"]})'),
+             f'(max {GATES["max_rep_reproj_over_session"]}) and {rep_worst_px:.1f} px '
+             f'(floor {GATES["rep_reproj_floor_px"]})'),
             (rep_dev <= GATES['max_rep_bone_dev'],
              f'bone lengths {100 * rep_dev:.0f}% off the session median '
              f'(max {100 * GATES["max_rep_bone_dev"]:.0f}%)'),
@@ -1235,6 +1258,10 @@ def main():
     ap.add_argument('--calib-stride', type=int, default=6,
                     help='take every Nth qualifying frame before selection')
     ap.add_argument('--scale', choices=['stature', 'aimpoint'], default='stature')
+    ap.add_argument('--bone-sum-ratio', type=float, default=None,
+                    help='long-bone sum / stature, for setups with no standing frames; default BONE_SUM_RATIO_BY_SET')
+    ap.add_argument('--no-bone-sum', action='store_true',
+                    help='old behaviour: a setup whose stature cannot be measured fails the stature gate')
     ap.add_argument('--save-all', action='store_true',
                     help='also save reps that fail the gates (flagged unusable)')
     ap.add_argument('--overwrite', action='store_true')
@@ -1245,6 +1272,7 @@ def main():
     args.json_dir = args.json_dir or os.path.join(args.root, args.set)
     args.video_dir = args.video_dir or os.path.join(args.root, f'{args.set}_video')
     args.cohort_stature = args.cohort_stature or COHORT_STATURE_BY_SET[args.set]
+    args.bone_sum_ratio = None if args.no_bone_sum else (args.bone_sum_ratio or BONE_SUM_RATIO_BY_SET[args.set])
     if args.exclude_actions is None:
         args.exclude_actions = EXCLUDE_ACTIONS_BY_SET[args.set]
     else:
